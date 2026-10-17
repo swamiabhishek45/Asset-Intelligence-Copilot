@@ -125,7 +125,20 @@ CREATE TABLE IF NOT EXISTS private_user_sessions (
     created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
 );
 
+CREATE TABLE IF NOT EXISTS document_embeddings (
+    id SERIAL PRIMARY KEY,
+    doc_id TEXT NOT NULL,
+    doc_type TEXT NOT NULL,
+    file_path TEXT NOT NULL,
+    section_title TEXT,
+    chunk_text TEXT NOT NULL,
+    embedding vector(1536),
+    created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+);
+
 CREATE INDEX IF NOT EXISTS idx_inspections_asset_date ON inspections(asset_id, inspected_at);
 CREATE INDEX IF NOT EXISTS idx_maintenance_asset_date ON maintenance(asset_id, started_at);
 CREATE INDEX IF NOT EXISTS idx_context_notes_asset ON context_notes(asset_id);
 CREATE INDEX IF NOT EXISTS idx_context_notes_ins ON context_notes(inspection_id);
+CREATE INDEX IF NOT EXISTS idx_doc_embeddings_doc_id ON document_embeddings(doc_id);
+
