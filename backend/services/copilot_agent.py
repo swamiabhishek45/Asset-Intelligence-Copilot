@@ -624,7 +624,9 @@ class CopilotAgent:
 
             conflict_text = ""
             if st.get("conflicts"):
-                conflict_text = f"\n> [!NOTE] Inspector Disagreement\n> {st['conflicts'][0]['message']}\n"
+                c0 = st["conflicts"][0]
+                c_msg = c0.get("message") or c0.get("claim") or "Inspector disagreement / unconfirmed claim noted."
+                conflict_text = f"\n> [!NOTE] Inspector Disagreement\n> {c_msg}\n"
 
             text = (
                 f"{status_word}\n"
