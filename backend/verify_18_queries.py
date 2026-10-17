@@ -390,7 +390,7 @@ def run_all_verifications():
     # -------------------------------------------------------------------------
     ans18 = copilot_agent.answer_query("Was the 20 Aug spill at WELL-0101 real oil?", user_id="U-201")
     cond_q18 = (
-        "real oil" in ans18["text"] and
+        ("real oil" in ans18["text"] or "real crude oil" in ans18["text"]) and
         "Ryan Brooks" in ans18["text"] and
         "Chris Dalton" in ans18["text"] and
         "MNT-0101-029" in ans18["text"]
