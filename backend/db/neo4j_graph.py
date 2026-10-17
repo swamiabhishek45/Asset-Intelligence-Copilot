@@ -68,14 +68,14 @@ class Neo4jGraphService:
                 else:
                     self._last_error_class = "connection_failed"
 
-                if attempt == max_retries:
+                if self._last_error_class in ("auth", "wrong_database") or attempt == max_retries:
                     logger.warning(
-                        f"Neo4j connection to {self.uri} failed after {max_retries} attempts "
+                        f"Neo4j connection to {self.uri} failed after {attempt} attempts "
                         f"(Cause Class: {self._last_error_class}): {e}. Falling back to in-memory graph."
                     )
                     self._driver = None
                     return None
-                time.sleep(min(0.2 * (2 ** (attempt - 1)), 2.0))
+                time.sleep(0.2)
         return None
 
     def get_status(self) -> Dict[str, Any]:
@@ -295,12 +295,22 @@ class Neo4jGraphService:
                 if c.get("inspection_id"):
                     self._nx_graph.add_edge(c["note_id"], c["inspection_id"], relation="CORRECTS")
 
+    def _ensure_graph_populated(self):
+        if self._nx_graph is not None and len(self._nx_graph) == 0:
+            try:
+                from backend.ingest.celery_worker import sync_all_entities_to_graph
+                sync_all_entities_to_graph()
+            except Exception as e:
+                logger.warning(f"Could not lazily populate graph: {e}")
+
     def get_neighborhood(self, asset_id: str, depth: int = 1) -> Dict[str, Any]:
         """
         Returns sub-graph neighborhood (nodes and edges) for a given asset_id up to specified depth.
         Works across both Neo4j and in-memory NetworkX fallback.
         """
         driver = self.get_driver()
+        if not driver:
+            self._ensure_graph_populated()
         if driver:
             try:
                 with driver.session(database=self.database) as session:
@@ -383,6 +393,7 @@ class Neo4jGraphService:
             except Exception:
                 pass
 
+        self._ensure_graph_populated()
         if self._nx_graph is not None:
             counts: Dict[str, int] = {}
             for n in self._nx_graph.nodes:
@@ -401,6 +412,8 @@ class Neo4jGraphService:
                     return {record["rel"]: record["count"] for record in res if record["rel"]}
             except Exception:
                 pass
+
+        self._ensure_graph_populated()
 
         if self._nx_graph is not None:
             counts: Dict[str, int] = {}

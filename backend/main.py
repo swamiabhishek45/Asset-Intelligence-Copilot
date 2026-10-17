@@ -152,6 +152,7 @@ def process_chat_query(req: QueryRequest):
     raw_visual_type = raw_res.get("visual_type", "none")
     visual_map = {
         "well_detail": "well_detail",
+        "status_card": "well_detail",
         "comparison_table": "comparison_table",
         "incident_card": "incident_card",
         "timeseries": "timeseries",
@@ -281,11 +282,30 @@ def trigger_ingest(req: IngestRequest):
             except Exception as e:
                 logger.warning(f"Could not enqueue Celery task ({e}). Falling back to inline execution.")
 
+    target_path = req.dataset_path
+    from pathlib import Path
+    if not Path(target_path).exists():
+        if Path(settings.SAMPLE_DATA_PATH).exists():
+            target_path = settings.SAMPLE_DATA_PATH
+
     # Inline synchronous execution
-    res = ingest_dataset_task(data_root=req.dataset_path, job_id=job_id)
+    res = ingest_dataset_task(data_root=target_path, job_id=job_id)
     res["job_id"] = job_id
     res["mode"] = "inline_sync"
     return res
+
+@app.post("/api/reset")
+def reset_system_state():
+    """Resets runtime context notes, overrides, and private sessions to pristine baseline."""
+    with get_db_connection() as conn:
+        cur = conn.cursor()
+        cur.execute("DELETE FROM context_notes WHERE note_id LIKE 'CTX-RT-%'")
+        cur.execute("DELETE FROM scoped_rules WHERE is_user_override = 1")
+        cur.execute("DELETE FROM private_user_sessions")
+        conn.commit()
+    cache_service.invalidate_all_queries()
+    settings.DATA_VERSION = f"v_{int(time.time())}"
+    return {"status": "reset", "data_version": settings.DATA_VERSION}
 
 @app.get("/api/ingest/{job_id}")
 def get_ingest_job_status(job_id: str):
