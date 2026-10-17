@@ -17,7 +17,7 @@ type ChatMessage =
 
 function textOf(content: ModelMessage["content"]): string {
   if (typeof content === "string") return content;
-  return content.map((part) => (part.type === "text" ? part.text : "")).join("");
+  return content.map((part: any) => (part.type === "text" ? part.text : "")).join("");
 }
 
 function outputOf(output: { type: string; value?: unknown }): string {
@@ -33,7 +33,7 @@ function toChatCompletionMessages(messages: ModelMessage[]): ChatMessage[] {
     }
     if (message.role === "assistant") {
       const parts = typeof message.content === "string" ? [] : message.content;
-      const toolCalls = parts.flatMap((part) =>
+      const toolCalls = parts.flatMap((part: any) =>
         part.type === "tool-call"
           ? [
               {
@@ -53,7 +53,7 @@ function toChatCompletionMessages(messages: ModelMessage[]): ChatMessage[] {
       ];
     }
     if (message.role === "tool") {
-      return message.content.flatMap((part) =>
+      return message.content.flatMap((part: any) =>
         part.type === "tool-result"
           ? [
               {

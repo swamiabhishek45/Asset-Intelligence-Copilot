@@ -72,7 +72,7 @@ export async function POST(req: Request) {
         user_id: z.string().optional().describe("Operator user id."),
         session_id: z.string().optional().describe("Chat session id for GateMem isolation."),
       }),
-      execute: ({ query, user_id, session_id }, { abortSignal }) =>
+      execute: ({ query, user_id, session_id }: any, { abortSignal }: any) =>
         executeQueryAssetCopilot(
           JSON.stringify({
             query,
@@ -93,7 +93,7 @@ export async function POST(req: Request) {
     abortSignal: req.signal,
     // Save the completed turn so OpenUI Cloud storage can reload the thread.
     // Only the new user message and this turn's replies; never the replayed history.
-    onEnd: async ({ responseMessages }) => {
+    onEnd: async ({ responseMessages }: any) => {
       try {
         await storeTurn({
           apiKey,

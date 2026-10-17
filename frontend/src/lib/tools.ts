@@ -17,7 +17,7 @@ export const appTools = {
       user_id: z.string().optional().describe("Operator user id, default U-201."),
       session_id: z.string().optional().describe("Chat session id for GateMem isolation."),
     }),
-    execute: ({ query, user_id, session_id }, { abortSignal }) =>
+    execute: ({ query, user_id, session_id }: any, { abortSignal }: any) =>
       executeQueryAssetCopilot(JSON.stringify({ query, user_id, session_id }), {
         signal: abortSignal,
       }),
