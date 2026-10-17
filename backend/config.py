@@ -16,6 +16,7 @@ class Settings(BaseSettings):
 
     # AI & Embeddings
     OPENAI_API_KEY: str = ""
+    GEMINI_API_KEY: str = ""
     EMBEDDING_MODEL: str = "text-embedding-3-small"
     
     # Gemma 4 via OpenRouter, Ollama, or Google AI Studio
