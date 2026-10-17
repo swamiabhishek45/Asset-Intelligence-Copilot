@@ -1,5 +1,5 @@
 # Dataset directories (strictly ignored per requirements)
-flytbase-ahc-swe-asset-intelligence-dataset/
+data/
 sample-data/
 assets/
 fleet/
