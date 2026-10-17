@@ -611,12 +611,12 @@ class SEHTGNNPacketScorer(nn.Module):
         feats = []
         for p in candidate_packets:
             feats.append([
-                float(p.get("is_non_producing", 0.0)),
-                float(p.get("has_spill", 0.0)),
-                float(p.get("has_repair", 0.0)),
-                float(p.get("has_note_or_correction", 0.0)),
-                float(p.get("has_reg_event", 0.0)),
-                float(p.get("is_latest_inspection", 0.0)),
+                float(p.get("is_non_producing") or 0.0),
+                float(p.get("has_spill") or 0.0),
+                float(p.get("has_repair") or 0.0),
+                float(p.get("has_note_or_correction") or 0.0),
+                float(p.get("has_reg_event") or 0.0),
+                float(p.get("is_latest_inspection") or 0.0),
             ])
 
         x = torch.tensor([feats], dtype=torch.float32)  # [1, N, 6]
