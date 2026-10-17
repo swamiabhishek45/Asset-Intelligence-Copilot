@@ -5,7 +5,7 @@ from backend.config import settings
 from backend.services.domain_tools import domain_engine
 from backend.services.gatemem_policy import gatemem_service
 from backend.services.rag_engine import rag_engine
-from backend.ml.rcn_cnn_htgnn import packet_scorer
+from backend.ml.rcn_cnn_htgnn import packet_scorer, SEHTGNNPacketScorer
 
 class CopilotAgent:
     """
@@ -67,10 +67,21 @@ class CopilotAgent:
         q_lower = q.lower()
         session_id = session_id or "default-session"
         asset_id = self._extract_asset_id(q)
+        area_name = self._extract_area_name(q)
 
-        # Build candidate timeline packets & run neural filter if well is identified
-        candidate_packets = self.scorer.build_candidate_packets_for_well(asset_id, lookback_weeks=104) if asset_id else []
-        top_packets, telemetry = self.scorer.score_with_telemetry(candidate_packets, reference_date_iso=f"{settings.BENCHMARK_TODAY}T00:00:00Z", top_k=15)
+        # Build multi-hop temporal subgraph & score candidate packets via SE-HTGNN
+        if asset_id:
+            candidate_packets = self.scorer.build_candidate_packets_for_well(asset_id, lookback_weeks=104)
+        elif area_name:
+            candidate_packets = self.scorer.build_candidate_packets_for_area(area_name, lookback_weeks=26)
+        else:
+            candidate_packets = self.scorer.build_fleet_sample_packets(lookback_weeks=12)
+
+        top_packets, telemetry = self.scorer.score_with_telemetry(
+            candidate_packets,
+            reference_date_iso=f"{settings.BENCHMARK_TODAY}T00:00:00Z",
+            top_k=15
+        )
 
         # ---------------------------------------------------------------------
         # 1. IN-CHAT FEEDBACK & RUNTIME MUTATIONS (Q12, Q13, Q14, Q16a, Q17)
