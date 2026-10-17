@@ -184,4 +184,6 @@ class VectorStoreService:
         except Exception:
             return 0
 
+    index_documents = index_all_documents
+
 vector_store = VectorStoreService()

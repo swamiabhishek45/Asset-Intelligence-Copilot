@@ -45,11 +45,13 @@ def check_postgres_availability(dsn: str = settings.POSTGRES_DSN, max_retries: i
     parsed = urlparse(dsn)
     host = parsed.hostname or "127.0.0.1"
     port = parsed.port or 5432
+    is_local = host in ("127.0.0.1", "localhost")
+    effective_retries = 2 if (is_local and "postgres" not in os.environ.get("POSTGRES_HOST", "")) else max_retries
 
-    for attempt in range(1, max_retries + 1):
+    for attempt in range(1, effective_retries + 1):
         try:
             with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-                s.settimeout(0.5)
+                s.settimeout(0.1 if is_local else 0.5)
                 s.connect((host, port))
             
             conn = psycopg.connect(dsn, connect_timeout=2)
@@ -59,8 +61,8 @@ def check_postgres_availability(dsn: str = settings.POSTGRES_DSN, max_retries: i
             logger.info(f"Connected to PostgreSQL database at {host}:{port}")
             return True
         except Exception as e:
-            if attempt == max_retries:
-                logger.warning(f"PostgreSQL connection to {host}:{port} failed after {max_retries} attempts: {e}. Falling back to SQLite.")
+            if attempt == effective_retries:
+                logger.warning(f"PostgreSQL connection to {host}:{port} failed after {effective_retries} attempts: {e}. Falling back to SQLite.")
                 _POSTGRES_CHECKED = True
                 _POSTGRES_AVAILABLE = False
                 return False

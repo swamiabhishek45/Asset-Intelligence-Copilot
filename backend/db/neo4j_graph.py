@@ -137,7 +137,8 @@ class Neo4jGraphService:
         inspections: List[Dict[str, Any]],
         maintenance: List[Dict[str, Any]],
         regulatory_events: List[Dict[str, Any]],
-        context_notes: List[Dict[str, Any]]
+        context_notes: List[Dict[str, Any]],
+        batch_size: int = 1000
     ):
         """
         Idempotent bulk ingest into Neo4j using UNWIND in batches of 1000 with MERGE.
