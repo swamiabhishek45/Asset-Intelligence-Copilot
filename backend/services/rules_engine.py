@@ -225,5 +225,13 @@ class DynamicRulesEngine:
                 print(f"{proto:<10} | {param:<28} | {val_str:<16} | {sfile:<20}")
         print("=" * 80 + "\n")
 
+    def get_rule_table(self) -> Dict[str, Any]:
+        """Returns structured dictionary of parsed rules for API exposure."""
+        return {
+            "well_types": self.well_type_rules,
+            "sops": self.sop_rules,
+            "data_root": str(self.root)
+        }
+
 # Global singleton
 rules_engine = DynamicRulesEngine()
