@@ -2,7 +2,7 @@
   "root": "Stack",
   "components": {
     "Card": {
-      "signature": "Card(children: (TextContent | MarkDownRenderer | CardHeader | Callout | TextCallout | CodeBlock | Image | ImageBlock | ImageGallery | Separator | HorizontalBarChart | RadarChart | PieChart | RadialChart | SingleStackedBarChart | ScatterChart | AreaChart | BarChart | LineChart | Table | TagBlock | Form | Buttons | IconButton | Steps | InlineHeader | EntityList | EditableTable | SnippetCardBlock | OverviewCardBlock | ContextCardBlock | CompositeCardBlock | VisualCardBlock | Tabs | Carousel | Stack)[], variant?: \"card\" | \"sunk\" | \"clear\", direction?: \"row\" | \"column\", gap?: \"none\" | \"xs\" | \"s\" | \"m\" | \"l\" | \"xl\" | \"2xl\", align?: \"start\" | \"center\" | \"end\" | \"stretch\" | \"baseline\", justify?: \"start\" | \"center\" | \"end\" | \"between\" | \"around\" | \"evenly\", wrap?: boolean)",
+      "signature": "Card(children: (TextContent | MarkDownRenderer | CardHeader | Callout | TextCallout | CodeBlock | Image | ImageBlock | ImageGallery | Separator | HorizontalBarChart | RadarChart | PieChart | RadialChart | SingleStackedBarChart | ScatterChart | AreaChart | BarChart | LineChart | Table | TagBlock | Form | Buttons | IconButton | Steps | InlineHeader | EntityList | EditableTable | SnippetCardBlock | OverviewCardBlock | ContextCardBlock | CompositeCardBlock | VisualCardBlock | Tabs | Carousel | Stack | FlytHeatmap | FlytMap)[], variant?: \"card\" | \"sunk\" | \"clear\", direction?: \"row\" | \"column\", gap?: \"none\" | \"xs\" | \"s\" | \"m\" | \"l\" | \"xl\" | \"2xl\", align?: \"start\" | \"center\" | \"end\" | \"stretch\" | \"baseline\", justify?: \"start\" | \"center\" | \"end\" | \"between\" | \"around\" | \"evenly\", wrap?: boolean)",
       "description": "Styled container. variant: \"card\" (default, elevated) | \"sunk\" (recessed) | \"clear\" (transparent). Always full width. Accepts all Stack flex params (default: direction \"column\"). Cards flex to share space in row/wrap layouts."
     },
     "CardHeader": {
@@ -206,7 +206,7 @@
       "description": "Tabbed container"
     },
     "TabItem": {
-      "signature": "TabItem(value: string, trigger: string, content: (TextContent | MarkDownRenderer | CardHeader | Callout | TextCallout | CodeBlock | Image | ImageBlock | ImageGallery | Separator | HorizontalBarChart | RadarChart | PieChart | RadialChart | SingleStackedBarChart | ScatterChart | AreaChart | BarChart | LineChart | Table | TagBlock | Form | Buttons | IconButton | Steps | InlineHeader | EntityList | EditableTable | SnippetCardBlock | OverviewCardBlock | ContextCardBlock | CompositeCardBlock | VisualCardBlock)[])",
+      "signature": "TabItem(value: string, trigger: string, content: (TextContent | MarkDownRenderer | CardHeader | Callout | TextCallout | CodeBlock | Image | ImageBlock | ImageGallery | Separator | HorizontalBarChart | RadarChart | PieChart | RadialChart | SingleStackedBarChart | ScatterChart | AreaChart | BarChart | LineChart | Table | TagBlock | Form | Buttons | IconButton | Steps | InlineHeader | EntityList | EditableTable | SnippetCardBlock | OverviewCardBlock | ContextCardBlock | CompositeCardBlock | VisualCardBlock | FlytHeatmap | FlytMap)[])",
       "description": "value is unique id, trigger is tab label, content is array of components"
     },
     "Accordion": {
@@ -328,6 +328,14 @@
     "Modal": {
       "signature": "Modal(title: string, open?: $binding<boolean>, children: (TextContent | MarkDownRenderer | CardHeader | Callout | TextCallout | CodeBlock | Image | ImageBlock | ImageGallery | Separator | HorizontalBarChart | RadarChart | PieChart | RadialChart | SingleStackedBarChart | ScatterChart | AreaChart | BarChart | LineChart | Table | TagBlock | Form | Buttons | IconButton | Steps | InlineHeader | EntityList | EditableTable | SnippetCardBlock | OverviewCardBlock | ContextCardBlock | CompositeCardBlock | VisualCardBlock)[], size?: \"sm\" | \"md\" | \"lg\")",
       "description": "Modal dialog. open is a reactive $boolean binding — set to true to open, X/Escape/backdrop auto-closes. Put Form with buttons inside children."
+    },
+    "FlytHeatmap": {
+      "signature": "FlytHeatmap(xLabels: string[], yLabels: string[], cells: number[][])",
+      "description": "Monochrome matrix heatmap for area×month or category grids. Pass column labels, row labels, and a numeric matrix (rows align with yLabels)."
+    },
+    "FlytMap": {
+      "signature": "FlytMap(titles: string[], lats: number[], lons: number[], volumes?: number[])",
+      "description": "Field map from parallel arrays: well titles, latitudes, longitudes, and optional spill volumes (bbl). Renders SVG plot plus coordinate list."
     }
   },
   "componentGroups": [
@@ -780,6 +788,12 @@
       },
       "Modal": {
         "$ref": "#/$defs/Modal"
+      },
+      "FlytHeatmap": {
+        "$ref": "#/$defs/FlytHeatmap"
+      },
+      "FlytMap": {
+        "$ref": "#/$defs/FlytMap"
       }
     },
     "required": [
@@ -864,7 +878,9 @@
       "CompositeCardBlock",
       "VisualCardItem",
       "VisualCardBlock",
-      "Modal"
+      "Modal",
+      "FlytHeatmap",
+      "FlytMap"
     ],
     "additionalProperties": false,
     "$defs": {
@@ -982,6 +998,12 @@
                 },
                 {
                   "$ref": "#/$defs/Stack"
+                },
+                {
+                  "$ref": "#/$defs/FlytHeatmap"
+                },
+                {
+                  "$ref": "#/$defs/FlytMap"
                 }
               ]
             }
@@ -3799,6 +3821,12 @@
                 },
                 {
                   "$ref": "#/$defs/VisualCardBlock"
+                },
+                {
+                  "$ref": "#/$defs/FlytHeatmap"
+                },
+                {
+                  "$ref": "#/$defs/FlytMap"
                 }
               ]
             }
@@ -3811,6 +3839,75 @@
         ],
         "additionalProperties": false,
         "description": "value is unique id, trigger is tab label, content is array of components"
+      },
+      "FlytHeatmap": {
+        "type": "object",
+        "properties": {
+          "xLabels": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "yLabels": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "cells": {
+            "type": "array",
+            "items": {
+              "type": "array",
+              "items": {
+                "type": "number"
+              }
+            }
+          }
+        },
+        "required": [
+          "xLabels",
+          "yLabels",
+          "cells"
+        ],
+        "additionalProperties": false,
+        "description": "Monochrome matrix heatmap for area×month or category grids. Pass column labels, row labels, and a numeric matrix (rows align with yLabels)."
+      },
+      "FlytMap": {
+        "type": "object",
+        "properties": {
+          "titles": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "lats": {
+            "type": "array",
+            "items": {
+              "type": "number"
+            }
+          },
+          "lons": {
+            "type": "array",
+            "items": {
+              "type": "number"
+            }
+          },
+          "volumes": {
+            "type": "array",
+            "items": {
+              "type": "number"
+            }
+          }
+        },
+        "required": [
+          "titles",
+          "lats",
+          "lons"
+        ],
+        "additionalProperties": false,
+        "description": "Field map from parallel arrays: well titles, latitudes, longitudes, and optional spill volumes (bbl). Renders SVG plot plus coordinate list."
       },
       "Carousel": {
         "type": "object",
@@ -4381,7 +4478,13 @@
       "EntityList size='small' (no header/footer) is only for use inside a CompositeCardItem body; use size='default' everywhere else.",
       "Image URLs must be real (from a tool result or the user) — never invent or template an image URL.",
       "Always pass a category to Icon — it enables a topical fallback when the exact icon name is unavailable.",
-      "EditableTable requires the consuming app to persist edits — use it only when the user or app explicitly asks for an editable table; default to Table for read-only data."
+      "EditableTable requires the consuming app to persist edits — use it only when the user or app explicitly asks for an editable table; default to Table for read-only data.",
+      "After query_asset_copilot returns, ALWAYS render structured UI — never answer with markdown alone when visual_payload is non-empty.",
+      "When the tool result includes openui_visual, emit those OpenUI Lang statements verbatim as your program (same variable names: root, vizHeader, vizMain, vizNarrative, vizCites). You may add Callout only for backend warnings.",
+      "Match user chart intent: pie/donut → PieChart; trend/graph → LineChart or AreaChart; compare/ranking → BarChart; table/list → Table; map → FlytMap; heatmap → FlytHeatmap.",
+      "Use FlytHeatmap(xLabels, yLabels, cells) for backend visual_type heatmap. Use FlytMap(titles, lats, lons, volumes) for visual_type map.",
+      "Keep FlytBase styling: monochrome cards, TagBlock for citations, MarkDownRenderer for narrative text from tool result.",
+      "Do not invent numeric series — only use values from visual_payload and text from the tool."
     ]
   }
 }

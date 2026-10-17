@@ -1,4 +1,5 @@
 import { envOr } from "@/lib/env";
+import { buildCopilotVisualProgram } from "@/lib/visuals/to-openui-lang";
 
 const BACKEND_URL = envOr("BACKEND_API_URL", "http://127.0.0.1:8000");
 
@@ -8,6 +9,8 @@ export type CopilotQueryResult = {
   visual_payload: Record<string, unknown>;
   citations: string[];
   pipeline_telemetry?: Record<string, unknown>;
+  /** Pre-built OpenUI Lang program derived from visual_type + visual_payload. */
+  openui_visual?: string | null;
 };
 
 export const queryAssetCopilotTool = {
@@ -53,5 +56,16 @@ export async function executeQueryAssetCopilot(
     throw new Error(`Backend /api/query failed (${response.status}): ${body}`);
   }
 
-  return (await response.json()) as CopilotQueryResult;
+  const body = (await response.json()) as CopilotQueryResult;
+  const openui_visual = buildCopilotVisualProgram(
+    {
+      text: body.text,
+      visual_type: body.visual_type,
+      visual_payload: body.visual_payload ?? {},
+      citations: body.citations,
+    },
+    query,
+  );
+
+  return { ...body, openui_visual };
 }

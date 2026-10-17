@@ -11,7 +11,8 @@
     "start": "next start",
     "deploy": "openui deploy",
     "lint": "eslint",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test:visuals": "npx --yes tsx --test src/lib/visuals/to-openui-lang.test.ts"
   },
   "dependencies": {
     "@ai-sdk/openai": "^4.0.72",
