@@ -1,8 +1,10 @@
+import time
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from datetime import datetime, timezone
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Tuple
+from backend.db.postgres import get_db_connection
 
 class ContextPacketRCN_CNN_HTGNN(nn.Module):
     """
@@ -43,10 +45,36 @@ class ContextPacketRCN_CNN_HTGNN(nn.Module):
         reference_date_iso: str = "2026-10-16T00:00:00Z",
         top_k: int = 30
     ) -> List[Dict[str, Any]]:
-        if not candidate_packets:
-            return []
+        surviving, _ = self.score_with_telemetry(candidate_packets, reference_date_iso, top_k)
+        return surviving
 
-        ref_dt = datetime.fromisoformat(reference_date_iso.replace("Z", "+00:00"))
+    def score_with_telemetry(
+        self,
+        candidate_packets: List[Dict[str, Any]],
+        reference_date_iso: str = "2026-10-16T00:00:00Z",
+        top_k: int = 30
+    ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+        t0 = time.time()
+        if not candidate_packets:
+            return [], {
+                "candidate_packets_total": 0,
+                "cnn_rcn_garbage_eliminated": 0,
+                "garbage_reduction_pct": 0.0,
+                "htgnn_top_packets_scored": 0,
+                "inference_ms": 0.0
+            }
+
+        def _parse_utc(dt_val: Any) -> datetime:
+            s = str(dt_val).strip().replace("Z", "+00:00")
+            try:
+                dt = datetime.fromisoformat(s)
+                if dt.tzinfo is not None:
+                    return dt.astimezone(timezone.utc).replace(tzinfo=None)
+                return dt
+            except Exception:
+                return datetime(2026, 10, 16)
+
+        ref_dt = _parse_utc(reference_date_iso)
 
         # Build feature tensor X [1, N, 6] for 1D-CNN + RCN garbage elimination
         feats = []
@@ -67,15 +95,18 @@ class ContextPacketRCN_CNN_HTGNN(nn.Module):
             keep_scores = [keep_scores]
 
         surviving_packets = []
+        garbage_eliminated = 0
+
         for pkt, cnn_rcn_score in zip(candidate_packets, keep_scores):
             rel_type = pkt.get("relation_type", "routine_inspection")
             # Eliminate routine inspection garbage unless it is the latest inspection
             if rel_type == "routine_inspection" and not pkt.get("is_latest_inspection") and cnn_rcn_score < 0.55:
+                garbage_eliminated += 1
                 continue
 
             # HTGNN Temporal + Relational Scoring
             pkt_dt_str = pkt.get("timestamp") or reference_date_iso
-            pkt_dt = datetime.fromisoformat(str(pkt_dt_str).replace("Z", "+00:00"))
+            pkt_dt = _parse_utc(pkt_dt_str)
             days_elapsed = max(0.0, (ref_dt - pkt_dt).total_seconds() / 86400.0)
             temporal_attn = 1.0 / (1.0 + 0.0025 * days_elapsed)
 
@@ -87,7 +118,124 @@ class ContextPacketRCN_CNN_HTGNN(nn.Module):
             surviving_packets.append(pkt_copy)
 
         surviving_packets.sort(key=lambda item: item["htgnn_score"], reverse=True)
-        return surviving_packets[:top_k]
+        top_scored = surviving_packets[:top_k]
+
+        elapsed_ms = round((time.time() - t0) * 1000.0, 2)
+        total_cand = len(candidate_packets)
+        red_pct = round((garbage_eliminated / total_cand) * 100.0, 1) if total_cand > 0 else 0.0
+
+        telemetry = {
+            "candidate_packets_total": total_cand,
+            "cnn_rcn_garbage_eliminated": garbage_eliminated,
+            "garbage_reduction_pct": red_pct,
+            "htgnn_top_packets_scored": len(top_scored),
+            "inference_ms": elapsed_ms
+        }
+        return top_scored, telemetry
+
+    def build_candidate_packets_for_well(self, asset_id: str, lookback_weeks: int = 52) -> List[Dict[str, Any]]:
+        """Extracts timeline packets for a well from DB for RCN+CNN+HTGNN scoring."""
+        packets = []
+        with get_db_connection() as conn:
+            cur = conn.cursor()
+            # Inspections
+            cur.execute(
+                """
+                SELECT inspection_id, inspected_at, ambient_temp_c, wellhead_temp_c, spill_detected, notes
+                FROM inspections
+                WHERE asset_id = %s
+                ORDER BY inspected_at DESC
+                LIMIT %s
+                """,
+                (asset_id, lookback_weeks)
+            )
+            ins_rows = cur.fetchall()
+            for idx, r in enumerate(ins_rows):
+                dt = float(r["wellhead_temp_c"]) - float(r["ambient_temp_c"])
+                is_non_prod = 1.0 if dt < 15.0 else 0.0
+                has_spill = 1.0 if r["spill_detected"] else 0.0
+                is_latest = 1.0 if idx == 0 else 0.0
+
+                rel = "routine_inspection"
+                if is_non_prod or has_spill:
+                    rel = "anomalous_inspection"
+
+                packets.append({
+                    "id": r["inspection_id"],
+                    "asset_id": asset_id,
+                    "timestamp": str(r["inspected_at"]),
+                    "relation_type": rel,
+                    "is_non_producing": is_non_prod,
+                    "has_spill": has_spill,
+                    "has_repair": 0.0,
+                    "has_note_or_correction": 0.0,
+                    "has_reg_event": 0.0,
+                    "is_latest_inspection": is_latest,
+                    "text": f"Inspection {r['inspection_id']} (ΔT={dt:.1f}°C, spill={bool(r['spill_detected'])})"
+                })
+
+            # Maintenance
+            cur.execute(
+                "SELECT maintenance_id, started_at, issue, action_taken, extracted_containment_hours FROM maintenance WHERE asset_id = %s",
+                (asset_id,)
+            )
+            for m in cur.fetchall():
+                packets.append({
+                    "id": m["maintenance_id"],
+                    "asset_id": asset_id,
+                    "timestamp": str(m["started_at"]),
+                    "relation_type": "corrective_report",
+                    "is_non_producing": 1.0,
+                    "has_spill": 0.0,
+                    "has_repair": 1.0,
+                    "has_note_or_correction": 0.0,
+                    "has_reg_event": 0.0,
+                    "is_latest_inspection": 0.0,
+                    "text": f"Repair {m['maintenance_id']}: {m['issue']}"
+                })
+
+            # Context notes
+            cur.execute(
+                "SELECT note_id, created_at, note_type, text, inspection_id FROM context_notes WHERE asset_id = %s",
+                (asset_id,)
+            )
+            for c in cur.fetchall():
+                rel = "correction_override" if c["note_type"] == "correction" else "operator_note"
+                packets.append({
+                    "id": c["note_id"],
+                    "asset_id": asset_id,
+                    "timestamp": str(c["created_at"]),
+                    "relation_type": rel,
+                    "is_non_producing": 0.0,
+                    "has_spill": 0.0,
+                    "has_repair": 0.0,
+                    "has_note_or_correction": 1.0,
+                    "has_reg_event": 0.0,
+                    "is_latest_inspection": 0.0,
+                    "text": f"Note {c['note_id']}: {c['text']}"
+                })
+
+            # Regulatory events
+            cur.execute(
+                "SELECT event_id, event_date, event_type, protocol_id, detail FROM regulatory_events WHERE asset_id = %s",
+                (asset_id,)
+            )
+            for reg in cur.fetchall():
+                packets.append({
+                    "id": reg["event_id"],
+                    "asset_id": asset_id,
+                    "timestamp": str(reg["event_date"]),
+                    "relation_type": "regulatory_breach",
+                    "is_non_producing": 0.0,
+                    "has_spill": 1.0,
+                    "has_repair": 0.0,
+                    "has_note_or_correction": 0.0,
+                    "has_reg_event": 1.0,
+                    "is_latest_inspection": 0.0,
+                    "text": f"Regulatory Event {reg['event_id']} ({reg.get('protocol_id', '')}): {reg['detail']}"
+                })
+
+        return packets
 
 # Global singleton
 packet_scorer = ContextPacketRCN_CNN_HTGNN()
