@@ -14,6 +14,7 @@
 [![Next.js Version](https://img.shields.io/badge/Next.js-16.4-black.svg?style=for-the-badge)](https://nextjs.org/)
 [![Architecture](https://img.shields.io/badge/Architecture-PostgreSQL%20%7C%20Neo4j%20%7C%20Redis%20%7C%20Celery-76b900.svg?style=for-the-badge)](https://flytbase.com)
 [![Benchmark](https://img.shields.io/badge/Benchmark-44%2F44%20--%20100%25-red.svg?style=for-the-badge)](FINAL_RESULTS_PAGE2.md)
+[![Live Demo Video](https://img.shields.io/badge/Demo%20Video-Watch%20Walkthrough-FF4F00.svg?style=for-the-badge&logo=google-drive)](https://drive.google.com/file/d/1LBhhiZ5gA6oMyy-6fJuSJ5Oc1nKyRXNB/view?usp=sharing)
 
 ---
 
@@ -40,6 +41,9 @@
 ---
 
 ## Live Demonstration Showcase
+
+> [!TIP]
+> 🎬 **Full Platform Video Walkthrough:** [Watch the FlytBase Asset Intelligence Copilot Live Video Demonstration](https://drive.google.com/file/d/1LBhhiZ5gA6oMyy-6fJuSJ5Oc1nKyRXNB/view?usp=sharing)
 
 <div align="center">
 
