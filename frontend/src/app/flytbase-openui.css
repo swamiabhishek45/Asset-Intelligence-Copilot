@@ -47,3 +47,38 @@
 .openui-agent-thread-header__end .flytbase-thread-toolbar {
   justify-content: flex-end;
 }
+
+.flyt-composer-action-bar {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+}
+
+.flyt-voice-status {
+  margin: 0 0 0.35rem;
+  font-size: 0.6875rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--openui-color-muted-foreground, #52525b);
+}
+
+.flyt-voice-error {
+  margin: 0 0 0.35rem;
+  font-size: 0.75rem;
+  color: #b91c1c;
+}
+
+.flyt-thread-composer[data-voice-active] {
+  outline: 1px solid var(--openui-color-border, #e4e4e7);
+}
+
+.flyt-welcome-voice-wrap {
+  display: inline-flex;
+  margin-right: 0.35rem;
+}
+
+.openui-agent-desktop-welcome-composer__action-bar {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+}

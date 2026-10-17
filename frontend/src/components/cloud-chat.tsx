@@ -15,6 +15,8 @@ import {
   vercelAIMessageFormat,
 } from "@openuidev/react-ui";
 import { flytbaseLibrary } from "@/lib/flytbase-library";
+import { FlytComposer } from "@/components/flyt-composer";
+import { FlytVoiceOrchestrator } from "@/components/flyt-voice-orchestrator";
 
 const flytbaseTheme = {
   mode: "light" as const,
@@ -55,10 +57,18 @@ function ModelToolbar({
 export default function CloudChat() {
   const [selectedModel, setSelectedModel] = usePersistedModel();
   const [selectedUser, setSelectedUser] = useState<string>("U-201");
+  const [voiceEnabled, setVoiceEnabled] = useState(false);
 
   useEffect(() => {
     const saved = localStorage.getItem("flytbase_active_user");
     if (saved) setSelectedUser(saved);
+  }, []);
+
+  useEffect(() => {
+    fetch("/api/realtime/status")
+      .then((r) => r.json())
+      .then((body: { enabled?: boolean }) => setVoiceEnabled(Boolean(body.enabled)))
+      .catch(() => setVoiceEnabled(false));
   }, []);
 
   const handleUserChange = (u: string) => {
@@ -88,6 +98,7 @@ export default function CloudChat() {
         theme={flytbaseTheme}
         starters={STARTERS}
       >
+        <FlytVoiceOrchestrator userId={selectedUser} voiceEnabled={voiceEnabled} />
         <AgentInterface.SidebarHeader
           logo={
             <img
@@ -132,6 +143,13 @@ export default function CloudChat() {
           description="Ask for status cards, charts, tables, heatmaps, and maps. Answers use the FlytBase backend and render as dynamic OpenUI."
           starterVariant="short"
         />
+        <AgentInterface.Composer>
+          <FlytComposer
+            userId={selectedUser}
+            voiceEnabled={voiceEnabled}
+            placeholder="Ask about wells, inspections, SOPs…"
+          />
+        </AgentInterface.Composer>
       </AgentInterface>
     </div>
   );
