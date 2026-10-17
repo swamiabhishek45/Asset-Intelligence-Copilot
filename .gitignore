@@ -34,6 +34,14 @@ logs/
 venv/
 env/
 
+# Frontend (Node)
+frontend/node_modules/
+frontend/dist/
+frontend/build/
+frontend/.next/
+frontend/.turbo/
+frontend/.env.local
+
 # IDE & OS
 .vscode/
 .idea/
