@@ -1,8 +1,9 @@
 import json
 from datetime import datetime, timedelta
 from typing import Dict, Any, List, Optional
-from backend.config import settings
+from backend.config import settings, get_as_of_date
 from backend.db.postgres import get_db_connection
+from backend.services.rules_engine import rules_engine
 
 class AssetIntelligenceDomainEngine:
     def __init__(self):
@@ -16,8 +17,8 @@ class AssetIntelligenceDomainEngine:
     # -------------------------------------------------------------------------
     def get_well_type_rules(self, cur) -> Dict[str, Dict[str, Any]]:
         """
-        Fetches active rules per well_type (T200, T350), prioritizing user overrides
-        (e.g., Michael Turner's Q14 rule: T350 pump_jack RCA after 2 repairs instead of 3).
+        Fetches active rules per well_type dynamically parsed from fleet/well-types/*.md,
+        prioritizing user overrides (e.g., Michael Turner's Q14 rule: T350 pump_jack RCA after 2 repairs).
         """
         cur.execute(
             """
@@ -27,12 +28,30 @@ class AssetIntelligenceDomainEngine:
             ORDER BY is_user_override ASC, id ASC
             """
         )
-        rules: Dict[str, Dict[str, Any]] = {
-            "T200": {"min_temp_delta_c": {"value": 15.0, "citation": "T200.md", "is_user_override": False},
-                     "rca_repairs_12m": {"value": 3.0, "citation": "T200.md", "is_user_override": False}},
-            "T350": {"min_temp_delta_c": {"value": 20.0, "citation": "T350.md", "is_user_override": False},
-                     "rca_repairs_12m": {"value": 3.0, "citation": "T350.md", "is_user_override": False}},
-        }
+        rules: Dict[str, Dict[str, Any]] = {}
+        # Seed from dynamically parsed well type rules (from files)
+        for wtype, rdict in rules_engine.well_type_rules.items():
+            rules[wtype] = {
+                "min_temp_delta_c": {
+                    "value": float(rdict.get("min_temp_delta_c", 15.0)),
+                    "citation": rdict.get("source_file", f"{wtype}.md"),
+                    "is_user_override": False
+                },
+                "rca_repairs_12m": {
+                    "value": float(rdict.get("rca_repairs_12m", 3.0)),
+                    "citation": rdict.get("source_file", f"{wtype}.md"),
+                    "is_user_override": False
+                },
+            }
+        # Fallback defaults if no files parsed
+        if not rules:
+            rules = {
+                "T200": {"min_temp_delta_c": {"value": 15.0, "citation": "T200.md", "is_user_override": False},
+                         "rca_repairs_12m": {"value": 3.0, "citation": "T200.md", "is_user_override": False}},
+                "T350": {"min_temp_delta_c": {"value": 20.0, "citation": "T350.md", "is_user_override": False},
+                         "rca_repairs_12m": {"value": 3.0, "citation": "T350.md", "is_user_override": False}},
+            }
+
         for r in cur.fetchall():
             wtype = r["scope_value"].upper()
             rules.setdefault(wtype, {})[r["parameter_name"]] = {
@@ -70,6 +89,7 @@ class AssetIntelligenceDomainEngine:
     # -------------------------------------------------------------------------
     def evaluate_well_status(self, asset_id: str) -> Dict[str, Any]:
         with self._get_conn() as conn:
+            today_str = get_as_of_date(conn)
             cur = conn.cursor()
             cur.execute(
                 """
@@ -126,7 +146,7 @@ class AssetIntelligenceDomainEngine:
                 WHERE asset_id = %s AND (completed_at IS NULL OR completed_at > %s)
                 ORDER BY started_at DESC
                 """,
-                (asset_id, settings.BENCHMARK_TODAY)
+                (asset_id, today_str)
             )
             open_repairs = cur.fetchall()
 
@@ -354,11 +374,12 @@ class AssetIntelligenceDomainEngine:
     def query_spills(
         self,
         start_date: str,
-        end_date: str = settings.BENCHMARK_TODAY,
+        end_date: Optional[str] = None,
         asset_id: Optional[str] = None,
         area_name: Optional[str] = None
     ) -> Dict[str, Any]:
         with self._get_conn() as conn:
+            end_date = end_date or get_as_of_date(conn)
             cur = conn.cursor()
             overrides = self.get_inspection_overrides(cur, asset_id)
             query = """
@@ -501,13 +522,21 @@ class AssetIntelligenceDomainEngine:
         equipment_filter: Optional[str] = None,
         lookback_days: int = 365
     ) -> Dict[str, Any]:
-        today_dt = datetime.fromisoformat(settings.BENCHMARK_TODAY)
-        start_date = (today_dt - timedelta(days=lookback_days)).strftime("%Y-%m-%d")
-
         with self._get_conn() as conn:
             cur = conn.cursor()
+            today_str = get_as_of_date(conn)
+            today_dt = datetime.fromisoformat(today_str)
+            start_date = (today_dt - timedelta(days=lookback_days)).strftime("%Y-%m-%d")
+
+            # Extract dynamic SOP limits parsed from markdown manuals
+            sr01_vol = float(rules_engine.sop_rules.get("SR-01", {}).get("reportable_volume_bbl", 5.0))
+            sr01_hrs = float(rules_engine.sop_rules.get("SR-01", {}).get("reportable_notice_hours", 24.0))
+            sr02_hrs = float(rules_engine.sop_rules.get("SR-02", {}).get("containment_limit_hours", 4.0))
+            sr03_days = int(rules_engine.sop_rules.get("SR-03", {}).get("verification_days", 60))
+            rc04_days = int(rules_engine.sop_rules.get("RC-04", {}).get("nov_response_days", 30))
+
             rules = self.get_well_type_rules(cur)
-            spills_data = self.query_spills(start_date, settings.BENCHMARK_TODAY, asset_id=asset_id, area_name=area_name)
+            spills_data = self.query_spills(start_date, today_str, asset_id=asset_id, area_name=area_name)
 
             breaches = []
             open_actions = []
@@ -517,7 +546,7 @@ class AssetIntelligenceDomainEngine:
                 wid = sp["asset_id"]
                 vol = sp["effective_volume_bbl"]
 
-                # SR-02: 4-hour containment limit
+                # SR-02: Containment limit (parsed from spill-response-sop.md)
                 cur.execute(
                     """
                     SELECT * FROM maintenance
@@ -529,7 +558,7 @@ class AssetIntelligenceDomainEngine:
                 mnt = cur.fetchone()
                 if mnt and mnt.get("extracted_containment_hours") is not None:
                     chours = float(mnt["extracted_containment_hours"])
-                    if chours > 4.0:
+                    if chours > sr02_hrs:
                         breaches.append({
                             "protocol_id": "SR-02",
                             "asset_id": wid,
@@ -537,12 +566,12 @@ class AssetIntelligenceDomainEngine:
                             "maintenance_id": mnt["maintenance_id"],
                             "report_file": mnt.get("report_file"),
                             "containment_hours": chours,
-                            "limit_hours": 4.0,
-                            "detail": f"Contained after about {chours} hours, against a 4-hour limit (found in {mnt['maintenance_id']} report)."
+                            "limit_hours": sr02_hrs,
+                            "detail": f"Contained after about {chours} hours, against a {sr02_hrs:g}-hour limit (found in {mnt['maintenance_id']} report)."
                         })
 
-                # SR-01 & SR-03 for reportable spills (>= 5.0 bbl)
-                if vol >= 5.0:
+                # SR-01 & SR-03 for reportable spills (>= reportable_volume_bbl)
+                if vol >= sr01_vol:
                     cur.execute(
                         "SELECT * FROM regulatory_events WHERE related_inspection_id = %s OR asset_id = %s ORDER BY event_date ASC",
                         (ins_id, wid)
@@ -555,9 +584,9 @@ class AssetIntelligenceDomainEngine:
                             "asset_id": wid,
                             "inspection_id": ins_id,
                             "volume_bbl": vol,
-                            "detail": f"Spill of {vol} bbl (>= 5 bbl reportable threshold) had a written notice due within 24 hours of {sp['date']}, and none is recorded."
+                            "detail": f"Spill of {vol} bbl (>={sr01_vol:g} bbl reportable threshold) had a written notice due within {sr01_hrs:g} hours of {sp['date']}, and none is recorded."
                         })
-                    elif report_ev.get("hours_to_report") and float(report_ev["hours_to_report"]) > 24.0:
+                    elif report_ev.get("hours_to_report") and float(report_ev["hours_to_report"]) > sr01_hrs:
                         nov_ev = next((e for e in reg_events if e.get("event_type") == "notice_of_violation"), None)
                         breaches.append({
                             "protocol_id": "SR-01",
@@ -566,11 +595,11 @@ class AssetIntelligenceDomainEngine:
                             "nov_event_id": nov_ev["event_id"] if nov_ev else None,
                             "fine_usd": nov_ev.get("fine_usd", 5000.0) if nov_ev else 5000.0,
                             "status": nov_ev.get("status", "open") if nov_ev else "open",
-                            "detail": f"Reported after {report_ev['hours_to_report']} hours ({report_ev['event_id']}), against a 24-hour limit."
+                            "detail": f"Reported after {report_ev['hours_to_report']} hours ({report_ev['event_id']}), against a {sr01_hrs:g}-hour limit."
                         })
 
-                    # SR-03: 60-day cleanup verification
-                    due_dt = (datetime.fromisoformat(sp["date"]) + timedelta(days=60)).strftime("%Y-%m-%d")
+                    # SR-03: Cleanup verification window (parsed from spill-response-sop.md)
+                    due_dt = (datetime.fromisoformat(sp["date"]) + timedelta(days=sr03_days)).strftime("%Y-%m-%d")
                     sr03_ev = next((e for e in reg_events if e.get("protocol_id") == "SR-03"), None)
                     if sr03_ev and sr03_ev.get("status") == "open":
                         breaches.append({
@@ -579,15 +608,15 @@ class AssetIntelligenceDomainEngine:
                             "event_id": sr03_ev["event_id"],
                             "detail": f"Cleanup verification was due by {due_dt} and is still open ({sr03_ev['event_id']})."
                         })
-                    elif due_dt > settings.BENCHMARK_TODAY:
+                    elif due_dt > today_str:
                         open_actions.append({
                             "protocol_id": "SR-03",
                             "asset_id": wid,
                             "due_date": due_dt,
-                            "detail": f"Agency verification of clean-up (SR-03) due within 60 days, by {due_dt}."
+                            "detail": f"Agency verification of clean-up (SR-03) due within {sr03_days} days, by {due_dt}."
                         })
 
-            # RC-04: NOV response deadline check
+            # RC-04: NOV response deadline check (parsed from regulatory-compliance-sop.md)
             if asset_id:
                 cur.execute(
                     """
@@ -598,20 +627,39 @@ class AssetIntelligenceDomainEngine:
                 )
                 novs = cur.fetchall()
                 for nov in novs:
-                    nov_due = (datetime.fromisoformat(str(nov["event_date"])[:10]) + timedelta(days=30)).strftime("%Y-%m-%d")
+                    nov_due = (datetime.fromisoformat(str(nov["event_date"])[:10]) + timedelta(days=rc04_days)).strftime("%Y-%m-%d")
                     cur.execute(
                         "SELECT * FROM regulatory_events WHERE asset_id = %s AND event_type = 'nov_response_filed'",
                         (asset_id,)
                     )
                     resp = cur.fetchone()
-                    if not resp and nov_due < settings.BENCHMARK_TODAY:
+                    if not resp and nov_due < today_str:
                         breaches.append({
                             "protocol_id": "RC-04",
                             "asset_id": asset_id,
                             "event_id": nov["event_id"],
                             "deadline": nov_due,
-                            "detail": f"Notice {nov['event_id']} needed a response by {nov_due}, and none is recorded."
+                            "detail": f"Notice {nov['event_id']} needed a response within {rc04_days} days (by {nov_due}), and none is recorded."
                         })
+
+                # Open / planned maintenance items & shut-ins (e.g. WELL-0001 planned shut-in from 2026-10-07)
+                cur.execute(
+                    """
+                    SELECT * FROM maintenance
+                    WHERE asset_id = %s AND (completed_at IS NULL OR completed_at > %s)
+                    ORDER BY started_at ASC
+                    """,
+                    (asset_id, today_str)
+                )
+                for om in cur.fetchall():
+                    open_actions.append({
+                        "protocol_id": "MAINTENANCE",
+                        "asset_id": asset_id,
+                        "maintenance_id": om["maintenance_id"],
+                        "issue": om.get("issue"),
+                        "started_at": str(om["started_at"])[:10],
+                        "detail": f"Maintenance action {om['maintenance_id']} ({om.get('issue')}) started {str(om['started_at'])[:10]} is open/pending."
+                    })
 
             # Check RCA corrective repair counts
             rca_query = """
@@ -624,7 +672,7 @@ class AssetIntelligenceDomainEngine:
                   AND substr(m.started_at, 1, 10) >= %s
                   AND substr(m.started_at, 1, 10) <= %s
             """
-            rca_params: List[Any] = [start_date, settings.BENCHMARK_TODAY]
+            rca_params: List[Any] = [start_date, today_str]
             if asset_id:
                 rca_query += " AND m.asset_id = %s"
                 rca_params.append(asset_id)
