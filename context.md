@@ -1,9 +1,10 @@
-# FlytBase Asset Intelligence Copilot: Domain Context & Evaluation Guide
+# FlytBase Asset Intelligence Copilot: Domain & Gateway Context
 
 **Evaluation Reference Date:** 16 October 2026  
 **Operating Environment:** Upstream Oil & Gas Field Asset Intelligence  
 **Geographic Coverage:** 4 Operating Areas (Southwest Block 23, Southwest Block 24, Northeast Block 7, Northeast Block 8)  
-**Fleet Inventory:** 200 Wells (`WELL-0001` through `WELL-0200`) across T200 and T350 classes
+**Fleet Inventory:** 200 Wells (`WELL-0001` through `WELL-0200`) across T200 and T350 classes  
+**User Interface Framework:** OpenUI Generative UI with Next.js 16 + OpenUI AI Gateway  
 
 ---
 
@@ -53,39 +54,60 @@ $$\Delta T = T_{\text{wellhead}} - T_{\text{ambient}}$$
 
 ---
 
-## 3. GateMem Memory Governance (arXiv:2606.18829)
+## 3. OpenUI AI Gateway & Generative UI Context
 
-The copilot implements the GateMem memory architecture to prevent hallucinations, cross-user privacy leaks, and ungrounded overrides:
+The frontend leverages the OpenUI AI Gateway (`https://api.thesys.dev/v1/embed`) to provide streaming conversational UI generation for oil field operators:
 
 ```text
-[Incoming Interaction]
-         │
-         ▼
+[Operator Browser]
+       │
+       ▼
 ┌────────────────────────────────────────────────────────┐
-│ GateMem Policy Gatekeeper                              │
-├────────────────────────────┬───────────────────────────┤
-│ Private User Session       │ Shared Domain Knowledge   │
-│ - Ephemeral per principal  │ - Scoped rules & models   │
-│ - Cost & work notes        │ - Sensor value overrides  │
-│ - Strict privacy isolation │ - Audit-logged provenance │
-└────────────────────────────┴───────────────────────────┘
-         │
-         ▼
+│ OpenUI Agentic Interface (React 19 + Tailwind v4)      │
+│ - Model Switcher (Gemini 3.6 Flash, 3.1 Pro, Claude)   │
+│ - Chat Stream Adapter (vercelAIAdapter)                │
+└──────────────────────────┬─────────────────────────────┘
+                           │
+                           ▼
 ┌────────────────────────────────────────────────────────┐
-│ Active Forgetting & Tombstoning ('no_memory')          │
-│ Retracted or forgotten notes are marked                │
-│ 'deleted_forgotten' and redacted from all RAG / SQL.   │
+│ Next.js API Chat Route (/api/chat)                     │
+│ - Authenticated to OpenUI AI Gateway via THESYS_API_KEY│
+│ - OpenAI Client: https://api.thesys.dev/v1/embed       │
+│ - Tool Registration: query_asset_copilot               │
+└──────────────────────────┬─────────────────────────────┘
+                           │
+                           ▼
+┌────────────────────────────────────────────────────────┐
+│ FastAPI Asset Intelligence Backend (/api/query)        │
+│ - Deterministic GateMem Governance + SQL Views         │
+│ - SE-HTGNN Neural Telemetry Scorer                     │
+│ - Generates OpenUI Visual Schema Payloads              │
 └────────────────────────────────────────────────────────┘
 ```
 
-- **Two-Tier Isolation:** Private sessions are strictly accessible only by the creating user. Shared knowledge (temperature overrides, validated spill measurements) propagates fleet-wide.
+### 3.1 Visual Schemas Returned to OpenUI
+When operators query the copilot, responses contain structured visual payloads rendered dynamically:
+- **`status_card`:** Single-well diagnostics (producing state, temperature delta, threshold, inspector name, and out-of-date warnings).
+- **`table`:** Multi-asset matrices (e.g. offline wells across Northeast Block 8, contractor repair cost summaries).
+- **`line_chart`:** Multi-week time series (e.g. 13-week thermal readings with operating threshold guide lines).
+- **`bar_chart`:** Comparative downtime and financial rankings (e.g. top downtime assets in Northeast Block 7).
+- **`map`:** Geo-coordinate scatter pins for spills, containment breaches, and offline wells.
+- **`heatmap`:** Area $\times$ Month spill frequency matrices.
+
+---
+
+## 4. GateMem Memory Governance (arXiv:2606.18829)
+
+The copilot implements the GateMem memory architecture to prevent hallucinations, cross-user privacy leaks, and ungrounded overrides:
+
+- **Two-Tier Isolation:** Private sessions are strictly accessible only by the creating user (`user_id`). Shared knowledge (temperature overrides, validated spill measurements) propagates fleet-wide.
 - **Zero Cross-User Leakage:** A query from Operator B attempting to access Operator A's private discussions halts with `gatemem_action = "no_memory"`.
 - **Active Forgetting:** Commands such as *"Forget note for WELL-0099"* mark the record `deleted_forgotten`, redacting the text and preventing retrieval.
 - **Conflict Handling:** When human claims conflict with physical telemetry, the copilot surfaces an `Inspector Disagreement` alert rather than silently overwriting sensor truth.
 
 ---
 
-## 4. Benchmark Evaluation Scenarios (Q1–Q18) Summary
+## 5. Benchmark Evaluation Scenarios (Q1–Q18) Summary
 
 | Scenario | Objective | Ground Truth / Target Resolution |
 | :--- | :--- | :--- |
