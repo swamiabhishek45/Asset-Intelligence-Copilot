@@ -4,8 +4,8 @@ Monorepo for the FlytBase Asset Intelligence Copilot challenge.
 
 | Area | Folder | Branch |
 |------|--------|--------|
-| API, ML, ingestion | [`backend/`](backend/README.md) | `backend-dev` |
-| Web UI | [`frontend/`](frontend/README.md) | `frontend-dev` |
+| API, ML, ingestion | [`backend/`](backend/README.md) | `backend` |
+| Web UI | [`frontend/`](frontend/README.md) | `frontend` |
 | Integration | entire repo | `main` |
 
 ## Quick links

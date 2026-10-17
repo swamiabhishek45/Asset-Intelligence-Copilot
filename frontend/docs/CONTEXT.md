@@ -27,7 +27,7 @@ Operator-facing chat for the FlytBase Asset Intelligence challenge: well status,
 
 ## Branch
 
-Work on **`frontend-dev`**; commit only under `frontend/`.
+Work on **`frontend`**; commit only under `frontend/`.
 
 ## User action required
 
