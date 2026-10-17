@@ -1,5 +1,6 @@
 import os
 from pathlib import Path
+from typing import Optional
 from pydantic_settings import BaseSettings
 
 class Settings(BaseSettings):
@@ -17,6 +18,7 @@ class Settings(BaseSettings):
     # AI & Embeddings
     OPENAI_API_KEY: str = ""
     GEMINI_API_KEY: str = ""
+    THESYS_API_KEY: str = ""
     EMBEDDING_MODEL: str = "text-embedding-3-small"
     
     # Gemma 4 via OpenRouter, Ollama, or Google AI Studio
@@ -24,8 +26,9 @@ class Settings(BaseSettings):
     COPILOT_API_KEY: str = ""
     COPILOT_MODEL: str = "google/gemma-4-31b-it:free"
 
-    # Benchmark reference date ("Today" is 16 Oct 2026 per evaluation guide)
+    # Benchmark reference date ("Today" is latest inspection date or overridable by AS_OF_DATE)
     BENCHMARK_TODAY: str = "2026-10-16"
+    AS_OF_DATE: Optional[str] = None
     SAMPLE_DATA_PATH: str = str(
         (Path(__file__).resolve().parent.parent / "sample-data")
         if (Path(__file__).resolve().parent.parent / "sample-data").exists()
@@ -37,3 +40,33 @@ class Settings(BaseSettings):
         extra = "ignore"
 
 settings = Settings()
+
+def get_as_of_date(conn=None) -> str:
+    """
+    Returns 'Today' dynamically:
+    1. Environment variable AS_OF_DATE if set.
+    2. Latest inspection date in the loaded dataset.
+    3. Default to 2026-10-17 if empty.
+    """
+    env_date = os.getenv("AS_OF_DATE") or getattr(settings, "AS_OF_DATE", None)
+    if env_date:
+        return str(env_date).strip()
+    try:
+        if conn is not None:
+            cur = conn.cursor()
+            cur.execute("SELECT MAX(substr(inspected_at, 1, 10)) AS max_date FROM inspections")
+            row = cur.fetchone()
+            if row and row.get("max_date"):
+                return str(row["max_date"])
+        else:
+            from backend.db.postgres import get_db_connection
+            with get_db_connection() as c:
+                cur = c.cursor()
+                cur.execute("SELECT MAX(substr(inspected_at, 1, 10)) AS max_date FROM inspections")
+                row = cur.fetchone()
+                if row and row.get("max_date"):
+                    return str(row["max_date"])
+    except Exception:
+        pass
+    return "2026-10-17"
+

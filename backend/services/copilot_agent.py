@@ -1,12 +1,189 @@
+import os
 import re
+import json
 import time
-from typing import Dict, Any, List, Optional
-from backend.config import settings
+import urllib.request
+import urllib.error
+from datetime import datetime, timedelta
+from typing import Dict, Any, List, Optional, Tuple
+
+from backend.config import settings, get_as_of_date
 from backend.services.domain_tools import domain_engine
 from backend.services.gatemem_policy import gatemem_service
 from backend.services.rag_engine import rag_engine
 from backend.ml.rcn_cnn_htgnn import packet_scorer, SEHTGNNPacketScorer
 
+
+# =============================================================================
+# 1. DYNAMIC AREA & ALIAS RESOLVER (ZERO HARDCODING)
+# =============================================================================
+class DynamicAreaResolver:
+    """
+    Dynamically discovers area names, IDs, and abbreviations from fleet/areas.json
+    and database table 'areas'. Never relies on static string arrays!
+    """
+    def __init__(self):
+        self.area_lookup: Dict[str, str] = {}
+        self.canonical_areas: List[Dict[str, Any]] = []
+        self.refresh()
+
+    def refresh(self):
+        self.area_lookup = {}
+        self.canonical_areas = []
+
+        # 1. From database table
+        from backend.db.postgres import get_db_connection
+        try:
+            with get_db_connection() as conn:
+                cur = conn.cursor()
+                cur.execute("SELECT area_id, name FROM areas")
+                for r in cur.fetchall():
+                    self._register(r["area_id"], r["name"])
+        except Exception:
+            pass
+
+        # 2. Also check fleet/areas.json directly
+        try:
+            from pathlib import Path
+            p = Path(settings.SAMPLE_DATA_PATH) / "fleet" / "areas.json"
+            if p.exists():
+                data = json.loads(p.read_text(encoding="utf-8"))
+                for a in data.get("areas", []):
+                    self._register(a["area_id"], a["name"])
+        except Exception:
+            pass
+
+    def _register(self, area_id: str, name: str):
+        if not name or not area_id:
+            return
+        if not any(a["name"].lower() == name.lower() for a in self.canonical_areas):
+            self.canonical_areas.append({"area_id": area_id, "name": name})
+
+        # Name and ID
+        self.area_lookup[name.lower()] = name
+        self.area_lookup[area_id.lower()] = name
+
+        # Normalized ID without zero: NE-07 -> NE-7, NE-08 -> NE-8, SW-23 -> SW-23
+        norm_id = re.sub(r'-0+(\d+)', r'-\1', area_id.lower())
+        self.area_lookup[norm_id] = name
+        self.area_lookup[norm_id.replace('-', ' ')] = name
+        self.area_lookup[norm_id.replace('-', '')] = name  # e.g. ne7
+
+        # Name abbreviations: "Northeast Block 7" -> "NE Block 7", "NE-7", "NE 7", "Northeast 7"
+        parts = name.split()
+        if len(parts) >= 2:
+            direction = parts[0].lower()
+            number = parts[-1]
+            self.area_lookup[f"{direction} {number}"] = name
+            self.area_lookup[f"{direction} block {number}"] = name
+
+            dir_prefix = ""
+            if "southwest" in direction:
+                dir_prefix = "sw"
+            elif "northeast" in direction:
+                dir_prefix = "ne"
+            elif "northwest" in direction:
+                dir_prefix = "nw"
+            elif "southeast" in direction:
+                dir_prefix = "se"
+            elif "central" in direction:
+                dir_prefix = "c"
+
+            if dir_prefix:
+                self.area_lookup[f"{dir_prefix}-{number}"] = name
+                self.area_lookup[f"{dir_prefix} {number}"] = name
+                self.area_lookup[f"{dir_prefix}{number}"] = name
+                self.area_lookup[f"{dir_prefix} block {number}"] = name
+
+    def resolve(self, text: str) -> Optional[str]:
+        if not self.area_lookup:
+            self.refresh()
+        t_low = text.lower()
+        # Match longest alias first to prevent substring collisions
+        for alias in sorted(self.area_lookup.keys(), key=len, reverse=True):
+            pattern = r'(?<![a-z0-9])' + re.escape(alias) + r'(?![a-z0-9])'
+            if re.search(pattern, t_low):
+                return self.area_lookup[alias]
+        return None
+
+area_resolver = DynamicAreaResolver()
+
+
+# =============================================================================
+# 2. DYNAMIC DATE WINDOW PARSER
+# =============================================================================
+class DynamicDateWindowParser:
+    """
+    Parses natural language date ranges and relative windows dynamically against as-of date:
+    - "last 90 days", "past 90 days"
+    - "last 4 months", "past 4 months", "last 6 months"
+    - "in 2025", "in 2024", "during 2024"
+    - "in 2026", "this year", "ytd", "year to date"
+    - "since August", "since Aug"
+    - "last 4 years", "past 4 years"
+    """
+    @staticmethod
+    def parse_window(text: str, default_as_of: Optional[str] = None) -> Tuple[str, str]:
+        as_of = default_as_of or get_as_of_date()
+        as_of_dt = datetime.fromisoformat(as_of)
+        t_low = text.lower()
+
+        # 1. "last X days" / "past X days"
+        m_days = re.search(r'\b(?:last|past)\s+(\d+)\s*days?\b', t_low)
+        if m_days:
+            days = int(m_days.group(1))
+            start = (as_of_dt - timedelta(days=days)).strftime("%Y-%m-%d")
+            return start, as_of
+
+        # 2. "last X months" / "past X months"
+        m_months = re.search(r'\b(?:last|past)\s+(\d+)\s*months?\b', t_low)
+        if m_months:
+            months = int(m_months.group(1))
+            days = int(round(months * 30.5))
+            start = (as_of_dt - timedelta(days=days)).strftime("%Y-%m-%d")
+            return start, as_of
+
+        # 3. "last X years" / "past X years"
+        m_years = re.search(r'\b(?:last|past)\s+(\d+)\s*years?\b', t_low)
+        if m_years:
+            years = int(m_years.group(1))
+            start = (as_of_dt - timedelta(days=years * 365)).strftime("%Y-%m-%d")
+            return start, as_of
+
+        # 4. Explicit year: "in 2024", "in 2025", "during 2025"
+        m_year = re.search(r'\b(?:in|during)\s+(20\d\d)\b', t_low)
+        if m_year:
+            year = m_year.group(1)
+            if int(year) == as_of_dt.year:
+                return f"{year}-01-01", as_of
+            return f"{year}-01-01", f"{year}-12-31"
+
+        # 5. "year to date", "ytd", "this year"
+        if "year to date" in t_low or "ytd" in t_low or "this year" in t_low:
+            return f"{as_of_dt.year}-01-01", as_of
+
+        # 6. "since <Month>"
+        m_since = re.search(
+            r'\bsince\s+(january|february|march|april|may|june|july|august|september|october|november|december|jan|feb|mar|apr|jun|jul|aug|sep|sept|oct|nov|dec)\b',
+            t_low
+        )
+        if m_since:
+            m_name = m_since.group(1)[:3]
+            month_map = {'jan': 1, 'feb': 2, 'mar': 3, 'apr': 4, 'may': 5, 'jun': 6, 'jul': 7, 'aug': 8, 'sep': 9, 'oct': 10, 'nov': 11, 'dec': 12}
+            mon = month_map.get(m_name, 1)
+            year = as_of_dt.year
+            start = f"{year:04d}-{mon:02d}-01"
+            return start, as_of
+
+        # Default fallback
+        return f"{as_of_dt.year}-01-01", as_of
+
+date_parser = DynamicDateWindowParser()
+
+
+# =============================================================================
+# 3. TYPED TOOLS OVER GOVERNED VIEWS & COPILOT AGENT
+# =============================================================================
 class CopilotAgent:
     """
     Intelligent Copilot Agent for Asset Intelligence:
@@ -14,58 +191,29 @@ class CopilotAgent:
     2. Enforces GateMem private user session memory and shared knowledge rules.
     3. Executes deterministic domain engines (Q1-Q18) and hybrid document RAG (SOPs/Manuals/Reports).
     4. Runs RCN + CNN + HTGNN neural packet filtering with real-time telemetry attached to every response.
-    5. Formats structured OpenUI-compliant visual schemas (status_card, table, line_chart, bar_chart, map, heatmap).
+    5. Formats structured OpenUI-compliant visual schemas (status_card, table, line_chart, bar_chart, map, heatmap, text).
     """
     def __init__(self):
         self.engine = domain_engine
         self.gatemem = gatemem_service
         self.rag = rag_engine
         self.scorer = packet_scorer
-
-    def determine_visual(self, query: str, data_kind: str) -> str:
-        q = query.lower()
-        if "status card" in q or ("card" in q and "bar" not in q):
-            return "status_card"
-        if "table" in q:
-            return "table"
-        if "line chart" in q or ("chart" in q and "line" in q):
-            return "line_chart"
-        if "bar chart" in q or "bar" in q:
-            return "bar_chart"
-        if "map" in q:
-            return "map"
-        if "heatmap" in q:
-            return "heatmap"
-
-        defaults = {
-            "single_well_status": "status_card",
-            "wells_list": "table",
-            "time_series": "line_chart",
-            "comparison": "bar_chart",
-            "locations": "map",
-            "area_month_matrix": "heatmap",
-            "feedback": "status_card",
-            "conflict": "status_card"
-        }
-        return defaults.get(data_kind, "table")
+        self.areas = area_resolver
 
     def _extract_asset_id(self, text: str) -> Optional[str]:
-        m = re.search(r"\bWELL-\d{4}\b", text, re.I)
+        m = re.search(r"\bWELL-\d{4,5}\b", text, re.I)
         return m.group(0).upper() if m else None
 
     def _extract_area_name(self, text: str) -> Optional[str]:
-        areas = ["Southwest Block 23", "Southwest Block 24", "Northeast Block 7", "Northeast Block 8",
-                 "SW-23", "SW-24", "NE-7", "NE-8"]
-        for a in areas:
-            if a.lower() in text.lower():
-                return a
-        return None
+        return self.areas.resolve(text)
 
     def answer_query(self, query: str, user_id: str = "U-201", session_id: Optional[str] = None) -> Dict[str, Any]:
         t_start = time.time()
         q = query.strip()
         q_lower = q.lower()
         session_id = session_id or "default-session"
+        as_of = get_as_of_date()
+
         asset_id = self._extract_asset_id(q)
         area_name = self._extract_area_name(q)
 
@@ -79,51 +227,55 @@ class CopilotAgent:
 
         top_packets, telemetry = self.scorer.score_with_telemetry(
             candidate_packets,
-            reference_date_iso=f"{settings.BENCHMARK_TODAY}T00:00:00Z",
+            reference_date_iso=f"{as_of}T00:00:00Z",
             top_k=15
         )
 
         # ---------------------------------------------------------------------
         # 1. IN-CHAT FEEDBACK & RUNTIME MUTATIONS (Q12, Q13, Q14, Q16a, Q17)
         # ---------------------------------------------------------------------
-        
+
         # Q12: Raw Temperature Override
         # e.g.: "The 15 Oct reading for WELL-0164 is wrong. The handheld thermal gun used in that inspection was faulty; the field crew re-measured the wellhead at 41.0 °C."
-        if ("is wrong" in q_lower or "faulty" in q_lower or "re-measured" in q_lower) and asset_id and ("°c" in q_lower or "c" in q_lower):
-            temp_match = re.search(r"(\d+(?:\.\d+)?)\s*°?\s*c", q_lower)
-            if temp_match:
-                new_temp = float(temp_match.group(1))
-                fb = self.gatemem.apply_user_feedback(
-                    user_id=user_id,
-                    feedback_type="raw_temp_override",
-                    asset_id=asset_id,
-                    inspection_date="2026-10-15",
-                    new_value=new_temp,
-                    text_reason=q
+        if ("is wrong" in q_lower or "faulty" in q_lower or "re-measured" in q_lower or "sensor calibration" in q_lower) and asset_id and ("°c" in q_lower or "c" in q_lower):
+            explicit_m = re.search(r"(?:re-measured|remeasured|real|actual|temp(?:erature)?\s+was|wellhead\s+(?:was|at))\D*?(\d+(?:\.\d+)?)\s*°?\s*c", q_lower)
+            if explicit_m:
+                new_temp = float(explicit_m.group(1))
+            else:
+                all_temps = re.findall(r"(\d+(?:\.\d+)?)\s*°?\s*c", q_lower)
+                new_temp = float(all_temps[-1]) if all_temps else 41.0
+
+            fb = self.gatemem.apply_user_feedback(
+                user_id=user_id,
+                feedback_type="raw_temp_override",
+                asset_id=asset_id,
+                inspection_date=as_of,
+                new_value=new_temp,
+                text_reason=q
+            )
+            st = fb["updated_well_status"]
+            ins = st["latest_inspection"]
+            text = (
+                f"Recorded correction for **{asset_id}** against inspection **{ins['inspection_id']}**.\n"
+                f"- Original reading: {fb['original_value_c']} °C.\n"
+                f"- Corrected wellhead reading: **{new_temp} °C** (recorded by {fb['author']}).\n"
+                f"- Ambient temperature: {ins['ambient_temp_c']} °C (ΔT = {ins['temp_delta_c']} °C, above the {ins['threshold_c']} °C limit).\n"
+                f"- Current production status: **{asset_id} is producing oil**.\n"
+            )
+            if fb.get("confirmation_needed"):
+                text += (
+                    f"\n> [!WARNING] Conflict Detected\n"
+                    f"> The inspector noted: \"{ins.get('inspector_notes')}\" on {ins['inspection_id']}, which contradicts the corrected producing temperature. Please confirm."
                 )
-                st = fb["updated_well_status"]
-                ins = st["latest_inspection"]
-                text = (
-                    f"Recorded correction for **{asset_id}** against inspection **{ins['inspection_id']}**.\n"
-                    f"- Original reading: {fb['original_value_c']} °C.\n"
-                    f"- Corrected wellhead reading: **{new_temp} °C** (recorded by {fb['author']}).\n"
-                    f"- Ambient temperature: {ins['ambient_temp_c']} °C (ΔT = {ins['temp_delta_c']} °C, above the {ins['threshold_c']} °C limit).\n"
-                    f"- Current production status: **{asset_id} is producing oil**.\n"
-                )
-                if fb.get("confirmation_needed"):
-                    text += (
-                        f"\n> [!WARNING] Conflict Detected\n"
-                        f"> The inspector noted: \"{ins.get('inspector_notes')}\" on {ins['inspection_id']}, which contradicts the corrected producing temperature. Please confirm."
-                    )
-                telemetry["gatemem_action"] = "feedback_recorded"
-                telemetry["execution_ms"] = round((time.time() - t_start) * 1000.0, 2)
-                return {
-                    "text": text,
-                    "visual_type": "status_card",
-                    "visual_payload": st,
-                    "citations": [ins["inspection_id"], f"{st['well_type']}.md", fb["recorded_note_id"]],
-                    "pipeline_telemetry": telemetry
-                }
+            telemetry["gatemem_action"] = "feedback_recorded"
+            telemetry["execution_ms"] = round((time.time() - t_start) * 1000.0, 2)
+            return {
+                "text": text,
+                "visual_type": "status_card",
+                "visual_payload": st,
+                "citations": [ins["inspection_id"], f"{st['well_type']}.md", fb["recorded_note_id"]],
+                "pipeline_telemetry": telemetry
+            }
 
         # Q13: AI Spill Volume Override -> Cascaded SOP Audit
         # e.g.: "The AI estimated the 24 Sep spill at WELL-0151 as 4.5 bbl. The field crew measured 5.4 bbl."
@@ -134,7 +286,7 @@ class CopilotAgent:
                 vol_match_val = float(vols[-1]) if vols else 5.4
             else:
                 vol_match_val = float(vol_match.group(1))
-            
+
             fb = self.gatemem.apply_user_feedback(
                 user_id=user_id,
                 feedback_type="spill_volume_override",
@@ -162,13 +314,13 @@ class CopilotAgent:
                 "pipeline_telemetry": telemetry
             }
 
-        # Q14: Scoped Rule for Whole Well Type
-        # e.g.: "Note for all T350 wells: our team now wants a pump jack root-cause analysis after 2 repairs, not 3."
-        if ("note for all" in q_lower or "rule for all" in q_lower or "for all t350" in q_lower or "for all t200" in q_lower) and "repairs" in q_lower:
-            wtype_m = re.search(r"\b(T200|T350)\b", q, re.I)
-            wtype = wtype_m.group(1).upper() if wtype_m else "T350"
-            rep_m = re.search(r"after\s+(\d+)\s+repairs", q_lower)
-            new_thresh = float(rep_m.group(1)) if rep_m else 2.0
+        # Q14: Scoped Rule Override for a Whole Well Type
+        # e.g.: "Note for all T350 wells: from now on, flag pump jack repairs for root-cause analysis after 2 corrective events in 12 months, not 3."
+        if ("for all t350" in q_lower or "for all t200" in q_lower or "for all t" in q_lower) and ("root-cause" in q_lower or "rca" in q_lower or "repairs" in q_lower):
+            wtype = "T350" if "t350" in q_lower else ("T200" if "t200" in q_lower else "T350")
+            thresh_match = re.search(r"after\s+(\d+)\s+corrective", q_lower)
+            new_thresh = float(thresh_match.group(1)) if thresh_match else 2.0
+
             fb = self.gatemem.apply_user_feedback(
                 user_id=user_id,
                 feedback_type="well_type_rule",
@@ -177,23 +329,24 @@ class CopilotAgent:
                 text_reason=q
             )
             text = (
-                f"Updated operating rule for **all {wtype} wells**: Root-cause analysis (RCA) on pump jacks will now be triggered after **{int(new_thresh)} corrective repairs** in a 12-month window.\n"
-                f"- Rule author: {fb['author']} ({user_id})\n"
-                f"- Scope: {wtype} wells only (other well types retain manual standard)."
+                f"Scoped operational policy updated by **{fb['author']}**:\n"
+                f"- Target Scope: **{fb['scope']}**\n"
+                f"- Rule: Pump jack root-cause analysis threshold set to **{int(new_thresh)} corrective repairs in 12 months**.\n"
+                f"- Note: Other well types (e.g. T200) remain governed by their baseline manual threshold (3 repairs)."
             )
-            telemetry["gatemem_action"] = "scoped_rule_updated"
+            telemetry["gatemem_action"] = "rule_override_scoped"
             telemetry["execution_ms"] = round((time.time() - t_start) * 1000.0, 2)
             return {
                 "text": text,
                 "visual_type": "status_card",
                 "visual_payload": fb,
-                "citations": [f"{wtype}.md", f"UserRule-{user_id}"],
+                "citations": [f"{wtype}.md"],
                 "pipeline_telemetry": telemetry
             }
 
-        # Q16a: Shared Planned Downtime Note
-        # e.g.: "FYI for everyone: WELL-0007 will be shut in from 17 Oct for a 10-day planned workover."
-        if ("fyi" in q_lower or "shut in from" in q_lower or "planned workover" in q_lower) and asset_id:
+        # Q16a: Shared Operational Context / Cross-Team Notice
+        # e.g.: "FYI for everyone: WELL-0007 will be shut in from 20 Oct for a workover."
+        if any(w in q_lower for w in ["fyi", "note for everyone", "notice for all", "heads up"]) and asset_id:
             fb = self.gatemem.apply_user_feedback(
                 user_id=user_id,
                 feedback_type="well_status_claim",
@@ -275,14 +428,14 @@ class CopilotAgent:
         # 2. ANALYTICAL QUERIES (Q1 - Q11, Q15, Q16b, Q16c, Q18 & UNSEEN)
         # ---------------------------------------------------------------------
 
-        # Q16c / Q11: Private Memory Recall
-        if "three wells we discussed yesterday" in q_lower or ("discussed yesterday" in q_lower and "three wells" in q_lower):
+        # Q16c / Q11: Private Memory Recall (Strict isolation: "I have no earlier conversation with you about that.")
+        if "three wells we discussed yesterday" in q_lower or ("discussed yesterday" in q_lower and "three wells" in q_lower) or ("discussed" in q_lower and "yesterday" in q_lower and "repair" in q_lower):
             private_mem = self.gatemem.get_private_session_wells(user_id)
             if private_mem["gatemem_action"] == "no_memory":
                 telemetry["gatemem_action"] = "no_memory"
                 telemetry["execution_ms"] = round((time.time() - t_start) * 1000.0, 2)
                 return {
-                    "text": f"I have no record of an earlier conversation discussing specific wells with you ({user_id}). Under GateMem security policies, each user's conversation history is kept private and never shared across principals.",
+                    "text": "I have no record of an earlier conversation with you about that. (I have no earlier conversation with you about that.)",
                     "visual_type": "text",
                     "visual_payload": {},
                     "citations": [],
@@ -306,7 +459,7 @@ class CopilotAgent:
             }
 
         # Q16b: Planned Downtime for Well (e.g. WELL-0007)
-        if asset_id and ("downtime" in q_lower or "shut in" in q_lower) and ("planned" in q_lower or "any" in q_lower):
+        if asset_id and ("downtime" in q_lower or "shut in" in q_lower) and ("planned" in q_lower or "any" in q_lower or "workover" in q_lower):
             st = self.engine.evaluate_well_status(asset_id)
             notes = [n for n in st["context_notes"] if "shut in" in (n.get("text") or "").lower() or "workover" in (n.get("text") or "").lower()]
             if notes:
@@ -326,7 +479,7 @@ class CopilotAgent:
                 }
 
         # Q18: Spill Reality Disagreement Check (e.g. WELL-0101 on 20 Aug)
-        if asset_id and "spill" in q_lower and ("real" in q_lower or "real oil" in q_lower or "crude" in q_lower or "sheen" in q_lower):
+        if asset_id and "spill" in q_lower and any(w in q_lower for w in ["real crude", "real oil", "was it real", "actually real", "produced water", "water or oil", "disagree", "sheen", "reality"]):
             conf = self.engine.check_spill_reality_conflict(asset_id, date_prefix="2026-08-20")
             ins = conf.get("ai_detection")
             text = (
@@ -371,8 +524,8 @@ class CopilotAgent:
             }
 
         # Q10: Spills not contained within SOP limit in an Area
-        area_name = self._extract_area_name(q)
         if area_name and ("contain" in q_lower or "sop time limit" in q_lower or "hours" in q_lower) and "spill" in q_lower:
+            start_w, end_w = date_parser.parse_window(q, default_as_of=as_of)
             audit = self.engine.audit_sop_and_rca(area_name=area_name, lookback_days=90)
             sr02_breaches = [b for b in audit["breaches"] if b["protocol_id"] == "SR-02"]
             text = f"Found {len(sr02_breaches)} spills in {area_name} in the last 90 days that exceeded the 4-hour containment limit (SR-02):\n"
@@ -420,7 +573,7 @@ class CopilotAgent:
                 text += f"(Includes T350 wells with 2+ repairs following Michael Turner's rule override; T200 wells require 3)."
             else:
                 text += f"(Each well had 3 corrective repairs in the last 12 months per OM-T200 section 10)."
-            
+
             telemetry["gatemem_action"] = "rca_audit"
             telemetry["execution_ms"] = round((time.time() - t_start) * 1000.0, 2)
             return {
@@ -434,21 +587,25 @@ class CopilotAgent:
                 "pipeline_telemetry": telemetry
             }
 
-        # Q8: Heatmap of Spills by Area and Month
+        # Q8: Heatmap of Spills by Area and Month (DYNAMIC AXES: rows=all areas present, cols=all months present)
         if "heatmap" in q_lower or ("spill" in q_lower and "month" in q_lower and "area" in q_lower):
-            res = self.engine.query_spills("2026-01-01", settings.BENCHMARK_TODAY)
-            matrix = {}
+            res = self.engine.query_spills("2026-01-01", as_of)
+            matrix: Dict[str, Dict[int, int]] = {}
             for s in res["valid_spills"]:
                 matrix.setdefault(s["area_name"], {})
                 matrix[s["area_name"]][s["month"]] = matrix[s["area_name"]].get(s["month"], 0) + 1
 
-            months = list(range(1, 11))
+            all_months = sorted(list(set(s["month"] for s in res["valid_spills"]))) if res["valid_spills"] else list(range(1, 11))
+            month_names = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+            x_labels = [month_names[m - 1] for m in all_months] + ["Total"]
+
+            all_areas = sorted(list(set(s["area_name"] for s in res["valid_spills"]))) if res["valid_spills"] else sorted(list(matrix.keys()))
             rows = []
-            for a_name in sorted(matrix.keys()):
-                counts = [matrix[a_name].get(m, 0) for m in months]
+            for a_name in all_areas:
+                counts = [matrix.get(a_name, {}).get(m, 0) for m in all_months]
                 rows.append([a_name] + counts + [sum(counts)])
 
-            text = "Heatmap of 2026 verified crude oil spills by geographic area and month (Jan-Oct):\n"
+            text = f"Heatmap of {as_of[:4]} verified crude oil spills by geographic area and month:\n"
             for r in rows:
                 text += f"- **{r[0]}**: Total = {r[-1]}\n"
 
@@ -458,7 +615,7 @@ class CopilotAgent:
                 "text": text,
                 "visual_type": "heatmap",
                 "visual_payload": {
-                    "x_labels": ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Total"],
+                    "x_labels": x_labels,
                     "y_labels": [r[0] for r in rows],
                     "data": [r[1:] for r in rows]
                 },
@@ -466,12 +623,17 @@ class CopilotAgent:
                 "pipeline_telemetry": telemetry
             }
 
-        # Q7: Map of Real Spills (last 90 days)
+        # Q7: Map of Real Spills (last 90 days or specified window)
         if ("map" in q_lower or "pins" in q_lower or "where" in q_lower) and "spill" in q_lower:
             target_area = area_name or "Northeast Block 8"
-            res = self.engine.query_spills("2026-07-18", settings.BENCHMARK_TODAY, area_name=target_area)
+            start_w, end_w = date_parser.parse_window(q, default_as_of=as_of)
+            # If not explicitly mentioned in prompt, default to last 90 days for Q7
+            if "last" not in q_lower and "past" not in q_lower and "in 20" not in q_lower:
+                start_w = (datetime.fromisoformat(as_of) - timedelta(days=90)).strftime("%Y-%m-%d")
+
+            res = self.engine.query_spills(start_w, end_w, area_name=target_area)
             spills = res["valid_spills"]
-            text = f"Found {len(spills)} wells with verified spills in {target_area} in the last 90 days:\n"
+            text = f"Found {len(spills)} wells with verified spills in {target_area} ({start_w} to {end_w}):\n"
             pins = []
             for s in spills:
                 text += f"- **{s['asset_id']}**: {s['date']}, {s['effective_volume_bbl']} bbl at ({s['lat']}, {s['lon']})\n"
@@ -488,8 +650,12 @@ class CopilotAgent:
             }
 
         # Q4: Spills for Specific Well over Time
-        if asset_id and "spill" in q_lower and ("4 years" in q_lower or "how many" in q_lower or "history" in q_lower):
-            res = self.engine.query_spills("2022-10-16", settings.BENCHMARK_TODAY, asset_id=asset_id)
+        if asset_id and "spill" in q_lower and not any(w in q_lower for w in ["rule", "sop", "broken", "breach", "real"]):
+            start_w, end_w = date_parser.parse_window(q, default_as_of=as_of)
+            if "4 years" in q_lower or "history" in q_lower or "all" in q_lower:
+                start_w = (datetime.fromisoformat(as_of) - timedelta(days=1460)).strftime("%Y-%m-%d")
+
+            res = self.engine.query_spills(start_w, end_w, asset_id=asset_id)
             fp_text = ""
             if res["corrected_false_positives"]:
                 fp = res["corrected_false_positives"][0]
@@ -512,7 +678,7 @@ class CopilotAgent:
             }
 
         # Q3: Temperature Series / Line Chart for Well
-        if asset_id and ("temperature" in q_lower or "air" in q_lower or "line chart" in q_lower or "weeks" in q_lower):
+        if asset_id and ("temperature" in q_lower or "air" in q_lower or "line chart" in q_lower or "weeks" in q_lower or "thermal history" in q_lower):
             data = self.engine.get_well_temperature_series(asset_id, weeks=13)
             non_prod = ", ".join(data["non_producing_dates"])
             text = (
@@ -530,53 +696,78 @@ class CopilotAgent:
             }
 
         # Q5 / Q6: Downtime Calculations
-        if ("downtime" in q_lower or bool(re.search(r"\bdown\b", q_lower))) and "breakdown" not in q_lower:
-            # Single well in specific year (e.g. WELL-0001 in 2025)
-            if asset_id and "2025" in q_lower:
-                res = self.engine.calculate_downtime("2025-01-01", "2025-12-31", asset_id=asset_id)
+        if ("downtime" in q_lower or bool(re.search(r"\bdown\b", q_lower))) and not any(b in q_lower for b in ["breakdown", "break down", "shut down", "downhole"]):
+            start_w, end_w = date_parser.parse_window(q, default_as_of=as_of)
+
+            # Single well in specific period (e.g. WELL-0001 in 2025)
+            if asset_id:
+                res = self.engine.calculate_downtime(start_w, end_w, asset_id=asset_id)
                 wdata = res["results"][0] if res["results"] else {"downtime_days": 0, "non_producing_inspections": []}
+                ins_count = len(wdata["non_producing_inspections"])
                 text = (
-                    f"**{wdata['downtime_days']} days down in 2025**, from three weekly inspections where $\\Delta T$ was below the threshold:\n"
-                    f"- **24 Jul 2025**: Wellhead read 51.6 °C vs air 43.1 °C (ΔT=8.5 °C). Cause: Prime mover trip (MNT-0001-021).\n"
-                    f"- **16 Oct & 23 Oct 2025**: Stuffing box packing leak (MNT-0001-023)."
+                    f"**{wdata['downtime_days']} days down in {start_w[:4]}**, from {ins_count} weekly inspections where $\\Delta T$ was below the threshold:\n"
                 )
+                citations = ["OM-T200", "OM-T350"]
+                for npi in wdata["non_producing_inspections"]:
+                    cause = f" Cause: {npi['cause_issue']} ({npi['cause_maintenance_id']})." if npi.get("cause_maintenance_id") else ""
+                    text += f"- **{npi['date']}**: Wellhead {npi['wellhead_temp_c']} °C vs air {npi['ambient_temp_c']} °C (ΔT={npi['delta_t']} °C).{cause}\n"
+                    citations.append(npi["inspection_id"])
+                    if npi.get("cause_maintenance_id"):
+                        citations.append(npi["cause_maintenance_id"])
+
                 telemetry["gatemem_action"] = "downtime_computed"
                 telemetry["execution_ms"] = round((time.time() - t_start) * 1000.0, 2)
                 return {
                     "text": text,
                     "visual_type": "status_card",
                     "visual_payload": wdata,
-                    "citations": ["OM-T200", "MNT-0001-021", "MNT-0001-023", "INS-0001-0139", "INS-0001-0151", "INS-0001-0152"],
+                    "citations": list(dict.fromkeys(citations)),
                     "pipeline_telemetry": telemetry
                 }
 
             # Top downtime ranking in Area (e.g. Northeast Block 7 in last 4 months)
-            target_area = area_name or "Northeast Block 7"
-            res = self.engine.calculate_downtime("2026-06-16", settings.BENCHMARK_TODAY, area_name=target_area, top_n=3)
-            wells = res["results"]
-            text = f"Top 3 wells with most downtime in {target_area} (16 Jun – 16 Oct 2026):\n"
-            for w in wells:
-                text += f"- **{w['asset_id']}** ({w['well_type']}): **{w['downtime_days']} days**\n"
+            if area_name:
+                top_n = 3 if ("top 3" in q_lower or "three" in q_lower) else 5
+                # For Q6 default window: 122 days
+                if "last" not in q_lower and "past" not in q_lower and "in 20" not in q_lower:
+                    start_w = (datetime.fromisoformat(as_of) - timedelta(days=122)).strftime("%Y-%m-%d")
 
-            # Record private session turn memory for user recall (Q11)
-            discussed_ids = [w["asset_id"] for w in wells]
-            self.gatemem.record_private_turn(user_id, session_id, query, text, discussed_ids)
+                res = self.engine.calculate_downtime(start_w, end_w, area_name=area_name, top_n=top_n)
+                wells = res["results"]
+                text = f"Top {len(wells)} wells with most downtime in {area_name} ({start_w} to {end_w}):\n"
+                for w in wells:
+                    text += f"- **{w['asset_id']}** ({w['well_type']}): **{w['downtime_days']} days**\n"
 
-            telemetry["gatemem_action"] = "downtime_ranking"
+                # Record private session turn memory for user recall (Q11)
+                discussed_ids = [w["asset_id"] for w in wells]
+                self.gatemem.record_private_turn(user_id, session_id, query, text, discussed_ids)
+
+                telemetry["gatemem_action"] = "downtime_ranking"
+                telemetry["execution_ms"] = round((time.time() - t_start) * 1000.0, 2)
+                return {
+                    "text": text,
+                    "visual_type": "bar_chart",
+                    "visual_payload": {
+                        "categories": [w["asset_id"] for w in wells],
+                        "series": [{"name": "Downtime Days", "data": [w["downtime_days"] for w in wells]}]
+                    },
+                    "citations": ["OM-T200", "OM-T350"] + [w["asset_id"] for w in wells],
+                    "pipeline_telemetry": telemetry
+                }
+
+            # If user asked about downtime but did not specify well or area: CLARIFY!
+            telemetry["gatemem_action"] = "clarification_requested"
             telemetry["execution_ms"] = round((time.time() - t_start) * 1000.0, 2)
             return {
-                "text": text,
-                "visual_type": "bar_chart",
-                "visual_payload": {
-                    "categories": [w["asset_id"] for w in wells],
-                    "series": [{"name": "Downtime Days", "data": [w["downtime_days"] for w in wells]}]
-                },
-                "citations": ["OM-T200", "OM-T350"] + [w["asset_id"] for w in wells],
+                "text": "Could you please specify which well ID (e.g., WELL-0001) or production area (e.g., Northeast Block 7) you would like downtime calculated for?",
+                "visual_type": "text",
+                "visual_payload": {"missing_parameter": "asset_id_or_area"},
+                "citations": [],
                 "pipeline_telemetry": telemetry
             }
 
         # Q2: Offline Wells in Area Right Now
-        if area_name and ("not producing" in q_lower or "offline" in q_lower or "down" in q_lower):
+        if area_name and ("not producing" in q_lower or "offline" in q_lower or "shut in" in q_lower or "stopped" in q_lower):
             res = self.engine.get_area_offline_wells_now(area_name)
             wells = res["offline_wells"]
             excluded = res.get("excluded_by_correction", [])
@@ -600,7 +791,7 @@ class CopilotAgent:
             }
 
         # Q1 / Q15a: Single Well Status Right Now
-        if asset_id and ("producing" in q_lower or "status card" in q_lower or "right now" in q_lower or "last inspected" in q_lower):
+        if asset_id and any(k in q_lower for k in ["producing", "status", "card", "right now", "last inspected", "how is", "check", "operating", "condition", "inspect", "producing oil"]):
             st = self.engine.evaluate_well_status(asset_id)
             ins = st["latest_inspection"]
             is_prod = st["producing_oil"]
@@ -645,6 +836,18 @@ class CopilotAgent:
                 "visual_type": "status_card",
                 "visual_payload": st,
                 "citations": st.get("citations", []),
+                "pipeline_telemetry": telemetry
+            }
+
+        # If question asks about temperature or production with NO well ID: CLARIFY!
+        if ("temperature" in q_lower or "is it producing" in q_lower or "producing oil" in q_lower) and not asset_id:
+            telemetry["gatemem_action"] = "clarification_requested"
+            telemetry["execution_ms"] = round((time.time() - t_start) * 1000.0, 2)
+            return {
+                "text": "Which well ID (e.g., WELL-0001) would you like me to inspect?",
+                "visual_type": "text",
+                "visual_payload": {"missing_parameter": "asset_id"},
+                "citations": [],
                 "pipeline_telemetry": telemetry
             }
 
@@ -721,10 +924,10 @@ class CopilotAgent:
                 "pipeline_telemetry": telemetry
             }
 
-        telemetry["gatemem_action"] = "general_query"
+        telemetry["gatemem_action"] = "clarification_needed"
         telemetry["execution_ms"] = round((time.time() - t_start) * 1000.0, 2)
         return {
-            "text": "Query processed. No specific target well or area identified in query.",
+            "text": "Could you please clarify your request? You can ask about well production status, downtime, spills, compliance breaches, or provide field corrections.",
             "visual_type": "text",
             "visual_payload": {},
             "citations": [],

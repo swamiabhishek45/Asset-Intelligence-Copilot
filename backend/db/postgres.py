@@ -107,11 +107,14 @@ class DBConnection:
             self.is_sqlite = False
             return self
 
-        self._conn = sqlite3.connect(self.sqlite_path, timeout=10.0)
+        self._conn = sqlite3.connect(self.sqlite_path, timeout=30.0)
         self._conn.row_factory = sqlite3.Row
-        self._conn.execute("PRAGMA journal_mode = WAL")
-        self._conn.execute("PRAGMA synchronous = NORMAL")
-        self._conn.execute("PRAGMA busy_timeout = 10000")
+        try:
+            self._conn.execute("PRAGMA journal_mode = WAL")
+            self._conn.execute("PRAGMA synchronous = NORMAL")
+            self._conn.execute("PRAGMA busy_timeout = 30000")
+        except Exception:
+            pass
         self.is_sqlite = True
         return self
 
