@@ -1,6 +1,6 @@
 import { envOr } from "@/lib/env";
 
-const BACKEND_URL = envOr("BACKEND_API_URL", "http://127.0.0.1:8000");
+const BACKEND_URL = envOr("BACKEND_URL", envOr("BACKEND_API_URL", "http://127.0.0.1:8000"));
 
 export type CopilotQueryResult = {
   text: string;
