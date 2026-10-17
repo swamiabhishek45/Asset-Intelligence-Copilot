@@ -1,9 +1,13 @@
 import os
 import re
+import time
+import socket
 import sqlite3
 import logging
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
+from urllib.parse import urlparse
+
 from backend.config import settings
 
 logger = logging.getLogger(__name__)
@@ -15,35 +19,74 @@ try:
 except ImportError:
     HAS_PSYCOPG = False
 
+try:
+    from sqlalchemy import create_engine, text
+    HAS_SQLALCHEMY = True
+except ImportError:
+    HAS_SQLALCHEMY = False
+
 _POSTGRES_CHECKED = False
 _POSTGRES_AVAILABLE = False
+_SQLALCHEMY_ENGINE = None
 
-def check_postgres_availability(dsn: str) -> bool:
+def check_postgres_availability(dsn: str = settings.POSTGRES_DSN, max_retries: int = 10) -> bool:
+    """
+    Checks if Postgres is available, retrying with exponential backoff up to max_retries times.
+    """
     global _POSTGRES_CHECKED, _POSTGRES_AVAILABLE
     if _POSTGRES_CHECKED:
         return _POSTGRES_AVAILABLE
-    _POSTGRES_CHECKED = True
+
     if not HAS_PSYCOPG or dsn.startswith("sqlite"):
-        _POSTGRES_AVAILABLE = False
-        return False
-    # Quick socket check on port 5432 to avoid multi-second TCP timeout on Windows
-    try:
-        import socket
-        with socket.socket() as s:
-            s.settimeout(0.05)
-            s.connect(('127.0.0.1', 5432))
-    except Exception:
+        _POSTGRES_CHECKED = True
         _POSTGRES_AVAILABLE = False
         return False
 
-    try:
-        conn = psycopg.connect(dsn, connect_timeout=1)
-        conn.close()
-        _POSTGRES_AVAILABLE = True
-        return True
-    except Exception:
-        _POSTGRES_AVAILABLE = False
-        return False
+    parsed = urlparse(dsn)
+    host = parsed.hostname or "127.0.0.1"
+    port = parsed.port or 5432
+    is_local = host in ("127.0.0.1", "localhost")
+    effective_retries = 2 if (is_local and "postgres" not in os.environ.get("POSTGRES_HOST", "")) else max_retries
+
+    for attempt in range(1, effective_retries + 1):
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                s.settimeout(0.1 if is_local else 0.5)
+                s.connect((host, port))
+            
+            conn = psycopg.connect(dsn, connect_timeout=2)
+            conn.close()
+            _POSTGRES_CHECKED = True
+            _POSTGRES_AVAILABLE = True
+            logger.info(f"Connected to PostgreSQL database at {host}:{port}")
+            return True
+        except Exception as e:
+            if attempt == effective_retries:
+                logger.warning(f"PostgreSQL connection to {host}:{port} failed after {effective_retries} attempts: {e}. Falling back to SQLite.")
+                _POSTGRES_CHECKED = True
+                _POSTGRES_AVAILABLE = False
+                return False
+            time.sleep(min(0.2 * (2 ** (attempt - 1)), 2.0))
+
+    _POSTGRES_CHECKED = True
+    _POSTGRES_AVAILABLE = False
+    return False
+
+def get_sqlalchemy_engine():
+    global _SQLALCHEMY_ENGINE
+    if _SQLALCHEMY_ENGINE is not None:
+        return _SQLALCHEMY_ENGINE, not _POSTGRES_AVAILABLE
+
+    if check_postgres_availability(settings.POSTGRES_DSN):
+        try:
+            _SQLALCHEMY_ENGINE = create_engine(settings.POSTGRES_DSN, pool_pre_ping=True)
+            return _SQLALCHEMY_ENGINE, False
+        except Exception as e:
+            logger.warning(f"Failed to create SQLAlchemy Postgres engine: {e}")
+
+    sqlite_url = f"sqlite:///{settings.SQLITE_PATH}"
+    _SQLALCHEMY_ENGINE = create_engine(sqlite_url, connect_args={"timeout": 30.0})
+    return _SQLALCHEMY_ENGINE, True
 
 class DictRowCursor:
     """Cursor wrapper that normalizes queries and returns dict rows across Postgres & SQLite."""
@@ -137,7 +180,6 @@ class DBConnection:
 def get_db_connection() -> DBConnection:
     return DBConnection()
 
-
 EFFECTIVE_INSPECTIONS_VIEW_SQL = """
 CREATE VIEW IF NOT EXISTS v_effective_inspections AS
 SELECT
@@ -220,6 +262,7 @@ def init_database():
     with get_db_connection() as conn:
         if conn.is_sqlite:
             cleaned_sql = sql_text
+            cleaned_sql = re.sub(r'\bvector\(\d+\)', 'TEXT', cleaned_sql, flags=re.I)
             cleaned_sql = re.sub(r'\bDOUBLE PRECISION\b', 'REAL', cleaned_sql, flags=re.I)
             cleaned_sql = re.sub(r'\bTIMESTAMPTZ\b', 'TEXT', cleaned_sql, flags=re.I)
             cleaned_sql = re.sub(r'\bSERIAL PRIMARY KEY\b', 'INTEGER PRIMARY KEY AUTOINCREMENT', cleaned_sql, flags=re.I)
@@ -234,10 +277,16 @@ def init_database():
             conn._conn.execute('CREATE INDEX IF NOT EXISTS idx_ctx_ins ON context_notes(inspection_id)')
             conn._conn.execute('CREATE INDEX IF NOT EXISTS idx_reg_asset ON regulatory_events(asset_id)')
             conn._conn.execute('CREATE INDEX IF NOT EXISTS idx_reg_ins ON regulatory_events(related_inspection_id)')
+            conn._conn.execute('CREATE INDEX IF NOT EXISTS idx_doc_emb_doc ON document_embeddings(doc_id)')
             # Governed SQL View
             conn._conn.execute("DROP VIEW IF EXISTS v_effective_inspections")
             conn._conn.execute(EFFECTIVE_INSPECTIONS_VIEW_SQL)
         else:
+            # Postgres: enable vector extension first
+            try:
+                conn.cursor().execute("CREATE EXTENSION IF NOT EXISTS vector;")
+            except Exception as e:
+                logger.warning(f"Could not create vector extension in Postgres: {e}")
             conn.cursor().execute(sql_text)
             pg_view_sql = EFFECTIVE_INSPECTIONS_VIEW_SQL.replace("CREATE VIEW IF NOT EXISTS", "CREATE OR REPLACE VIEW")
             conn.cursor().execute(pg_view_sql)
@@ -246,4 +295,3 @@ def init_database():
 if __name__ == "__main__":
     init_database()
     print("Database schema, governed view v_effective_inspections, and performance indexes initialized.")
-
