@@ -14,7 +14,9 @@ import { FLYTBASE_AGENT_APPENDIX } from "@/lib/flytbase-prompt";
 import { requiredEnv } from "@/lib/env";
 import { storeTurn } from "@/lib/history";
 import { resolveRequestedModel } from "@/lib/models";
-import { appTools } from "@/lib/tools";
+import { executeQueryAssetCopilot, queryAssetCopilotTool } from "@/lib/tools/query-asset-copilot";
+import { tool } from "ai";
+import { z } from "zod";
 
 // The generated spec carries the library and its prompt options; generateSystemPrompt takes them separately.
 const { promptOptions, ...library } = librarySpec;
@@ -29,10 +31,12 @@ export async function POST(req: Request) {
     messages,
     threadId,
     model: requestedModel,
+    userId = "U-201",
   } = (await req.json()) as {
     messages?: UIMessage[];
     threadId?: string;
     model?: unknown;
+    userId?: string;
   };
 
   if (!Array.isArray(messages) || messages.length === 0) {
@@ -56,11 +60,35 @@ export async function POST(req: Request) {
 
   const baseSystem = generateSystemPrompt({ cloud: true, library, promptOptions });
 
+  const dynamicTools = {
+    query_asset_copilot: tool({
+      description: queryAssetCopilotTool.description,
+      inputSchema: z.object({
+        query: z
+          .string()
+          .trim()
+          .min(1)
+          .describe("Operator question about wells, inspections, maintenance, or SOPs."),
+        user_id: z.string().optional().describe("Operator user id."),
+        session_id: z.string().optional().describe("Chat session id for GateMem isolation."),
+      }),
+      execute: ({ query, user_id, session_id }, { abortSignal }) =>
+        executeQueryAssetCopilot(
+          JSON.stringify({
+            query,
+            user_id: user_id || userId,
+            session_id: session_id || threadId,
+          }),
+          { signal: abortSignal },
+        ),
+    }),
+  };
+
   const result = streamText({
     model: openai.chat(model),
     system: `${baseSystem}\n\n${FLYTBASE_AGENT_APPENDIX}`,
     messages: modelMessages,
-    tools: appTools,
+    tools: dynamicTools,
     stopWhen: stepCountIs(5),
     abortSignal: req.signal,
     // Save the completed turn so OpenUI Cloud storage can reload the thread.

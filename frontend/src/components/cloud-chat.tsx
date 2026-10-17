@@ -1,6 +1,8 @@
 "use client";
 
+import React, { useState, useEffect } from "react";
 import { BackendStatus } from "@/components/backend-status";
+import { UserPicker } from "@/components/user-picker";
 import { usePersistedModel } from "@/hooks/use-persisted-model";
 import { MODEL_OPTIONS } from "@/lib/models";
 import { STARTERS } from "@/lib/starters";
@@ -30,12 +32,17 @@ const flytbaseTheme = {
 function ModelToolbar({
   selectedModel,
   setSelectedModel,
+  selectedUser,
+  setSelectedUser,
 }: {
   selectedModel: string;
   setSelectedModel: (model: string) => void;
+  selectedUser: string;
+  setSelectedUser: (user: string) => void;
 }) {
   return (
-    <div className="flytbase-thread-toolbar max-w-full min-w-0">
+    <div className="flytbase-thread-toolbar flex items-center gap-3 max-w-full min-w-0">
+      <UserPicker selectedUser={selectedUser} onUserChange={setSelectedUser} />
       <ModelSwitcher
         models={MODEL_OPTIONS}
         value={selectedModel}
@@ -47,11 +54,23 @@ function ModelToolbar({
 
 export default function CloudChat() {
   const [selectedModel, setSelectedModel] = usePersistedModel();
+  const [selectedUser, setSelectedUser] = useState<string>("U-201");
+
+  useEffect(() => {
+    const saved = localStorage.getItem("flytbase_active_user");
+    if (saved) setSelectedUser(saved);
+  }, []);
+
+  const handleUserChange = (u: string) => {
+    setSelectedUser(u);
+    localStorage.setItem("flytbase_active_user", u);
+  };
+
   const llm = fetchLLM({
     url: "/api/chat",
     streamAdapter: vercelAIAdapter(),
     messageFormat: vercelAIMessageFormat,
-    body: { model: selectedModel },
+    body: { model: selectedModel, userId: selectedUser },
   });
 
   const storage = useOpenuiCloudStorage({
@@ -100,7 +119,12 @@ export default function CloudChat() {
         <AgentInterface.ThreadHeader
           showChatTitle={false}
           end={
-            <ModelToolbar selectedModel={selectedModel} setSelectedModel={setSelectedModel} />
+            <ModelToolbar
+              selectedModel={selectedModel}
+              setSelectedModel={setSelectedModel}
+              selectedUser={selectedUser}
+              setSelectedUser={handleUserChange}
+            />
           }
         />
         <AgentInterface.Welcome
