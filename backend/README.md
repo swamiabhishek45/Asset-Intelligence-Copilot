@@ -2,7 +2,7 @@
 
 Production-grade backend for the FlytBase Asset Intelligence Copilot.
 
-**Work on this code from the `backend-dev` branch.** Only change files under `backend/` (and coordinate before editing shared root files).
+**Work on this code from the `backend` branch.** Only change files under `backend/` (and coordinate before editing shared root files).
 
 ## System Architecture
 

@@ -1,43 +1,43 @@
 # Branch workflow (avoid merge conflicts)
 
-This repo is a **monorepo**: backend and frontend live in separate top-level folders. Use **long-lived topic branches** so you rarely edit the same files.
+This repo is a **monorepo**: backend and frontend live in separate top-level folders. Use three long-lived branches.
 
-| Branch | Owner | Edit only |
-|--------|--------|-----------|
-| `main` | Integration | Merge via PR; no direct feature work |
-| `backend-dev` | Backend | `backend/**` |
-| `frontend-dev` | Frontend | `frontend/**` |
+| Branch | Purpose | Edit only |
+|--------|---------|-----------|
+| `main` | Integration (default) | Merge via PR; no direct feature work |
+| `backend` | Backend features | `backend/**` |
+| `frontend` | Frontend features | `frontend/**` |
 
 ## Daily workflow
 
 ### Backend developer
 
 ```bash
-git checkout backend-dev
-git pull origin backend-dev
+git checkout backend
+git pull origin backend
 # … change only under backend/ …
 git add backend/
 git commit -m "feat(backend): …"
-git push origin backend-dev
-# Open PR: backend-dev → main
+git push origin backend
+# Open PR: backend → main
 ```
 
 ### Frontend developer
 
 ```bash
-git checkout frontend-dev
-git pull origin frontend-dev
+git checkout frontend
+git pull origin frontend
 # … change only under frontend/ …
 git add frontend/
 git commit -m "feat(frontend): …"
-git push origin frontend-dev
-# Open PR: frontend-dev → main
+git push origin frontend
+# Open PR: frontend → main
 ```
 
 ### After `main` moves (sync your branch)
 
 ```bash
-git checkout frontend-dev   # or backend-dev
+git checkout frontend   # or backend
 git fetch origin
 git merge origin/main
 git push origin HEAD
@@ -45,11 +45,11 @@ git push origin HEAD
 
 ## Shared files (coordinate)
 
-These paths affect both sides. **Avoid editing them on topic branches** unless you agree first:
+Avoid editing these on topic branches unless you agree first:
 
-- `docker-compose.yml` — backend-owned today; add frontend services in a follow-up PR from whoever needs them
-- `.gitignore` — add sections by area (`# Frontend`, `# Backend`)
-- Root `README.md` — short overview only; details live in `backend/README.md` and `frontend/README.md`
+- `docker-compose.yml`
+- `.gitignore`
+- Root `README.md` (details live in `backend/README.md` and `frontend/README.md`)
 
 ## Dataset
 
