@@ -108,12 +108,20 @@ const openai = createOpenAI({
 
 ## 3. Storage & Governed Views Layer
 
-### 3.1 Dual-Engine Relational Storage
-- **Primary Engine:** PostgreSQL with `pgvector` support (`postgresql://aic_user:aic_password@localhost:5432/asset_intelligence`).
-- **Resilient Fallback:** Local high-performance SQLite (`asset_intelligence.db`) with WAL journal mode, 10-second busy timeout, and automatic dialect translation (`::timestamptz`, `NOW()`, `TRUE/FALSE`).
+### 3.1 Multi-Tier Resilient Storage & Infrastructure Fallbacks
+The system operates with zero-downtime resilient fallbacks across all tiers:
+1. **Relational Database Tier:**
+   - Primary: PostgreSQL with `pgvector` support (`postgresql://aic_user:aic_password@localhost:5432/asset_intelligence`).
+   - Fallback: Local embedded SQLite (`asset_intelligence.db`) with WAL journal mode, 30-second busy timeout, and automatic dialect translation (`::timestamptz`, `NOW()`, `TRUE/FALSE`).
+2. **Graph Knowledge Tier:**
+   - Primary: Neo4j temporal graph database (`bolt://localhost:7687`).
+   - Fallback: In-memory NetworkX multi-directed graph (`Neo4jGraphService._nx_graph`) with masked credentials and zero crash loops when Neo4j is offline.
+3. **Caching & Asynchronous Tasks Tier:**
+   - Primary: Redis (`redis://localhost:6379/0`) with Celery worker pool.
+   - Fallback: In-memory dictionary/TTL cache and synchronous execution fallback (`ingest_dataset_task`) when Redis is not running.
 
 ### 3.2 Governed SQL View: `v_effective_inspections`
-All 39,567 inspection records are unified under `v_effective_inspections`. Every query automatically inherits:
+All inspection records are unified under `v_effective_inspections`. Every query automatically inherits:
 1. **Dynamic Temperature Overrides:** Raw wellhead temperatures (`raw_wellhead_temp_c`) are replaced by validated operator corrections (`effective_wellhead_temp_c`), dynamically updating `effective_temp_delta_c`.
 2. **Rainwater False-Positive Suppression:** Inspections flagged as rainwater (e.g. `INS-0001-0070`) have `effective_spill_detected = 0`, keeping spill counts exact.
 3. **Dynamic Spill Volume Corrections:** Field crew measurements supersede AI estimates (e.g. `INS-0151-0201` updated from 4.5 to 5.4 bbl).
@@ -121,23 +129,26 @@ All 39,567 inspection records are unified under `v_effective_inspections`. Every
 
 ---
 
-## 4. SE-HTGNN + 1D-CNN + RCN Neural Architecture
+## 4. Evidence Pre-Filter & Relation-Weighted Graph Ranker
 
-Implemented in [`backend/ml/rcn_cnn_htgnn.py`](file:///c:/Users/Priyanshu%20Patil/Documents/program01/flytbase/flytebase/backend/ml/rcn_cnn_htgnn.py), this module prunes high-volume routine inspection telemetry while preserving 100% of anomalies.
+Implemented in [`backend/ml/rcn_cnn_htgnn.py`](file:///c:/Users/Priyanshu%20Patil/Documents/program01/flytbase/flytebase/backend/ml/rcn_cnn_htgnn.py), this module functions as a **rule-based evidence prefilter plus graph relation-weighted ranker**, NOT an end-to-end trained black box. Deterministic SQL and rules produce all final numbers; the graph ranker extracts and ranks multi-hop context packets for operator explanations.
 
 ```mermaid
 flowchart LR
     CandidatePackets["Candidate Telemetry Packets (104-week lookback)"]
-    CNN_RCN["1D-CNN + RCN Anomaly Filter"]
+    EntityCheck{"Entity Exists in DB?"}
+    CNN_RCN["1D-CNN + RCN Heuristic Anomaly Filter"]
     PruningGate{"Keep Score >= 0.55 or Anomaly/Action?"}
-    Pruned["Pruned Routine Noise (89.4% eliminated)"]
+    Pruned["Pruned Routine Noise"]
     Surviving["Surviving Anomalies & Critical Records"]
     NodeProj["Heterogeneous Node Projections R^H (H=16)"]
     RelationGRU["Relation-wise GRU Dynamic Attention"]
     TemporalDecay["Spatio-Temporal Decay gamma(t)"]
-    FinalScores["Composite HTGNN Scoring & Ranking (Top-K)"]
+    FinalScores["Composite Scoring & Ranking (Top-K)"]
 
-    CandidatePackets --> CNN_RCN --> PruningGate
+    CandidatePackets --> EntityCheck
+    EntityCheck -- No --> Drop["Discard Non-Existent Entities"]
+    EntityCheck -- Yes --> CNN_RCN --> PruningGate
     PruningGate -- No --> Pruned
     PruningGate -- Yes --> Surviving
     Surviving --> NodeProj
@@ -149,7 +160,7 @@ flowchart LR
 
 ### 4.1 Heterogeneous Graph Nodes & Edges
 - **Node Schemas:**
-  - `Well`: Spatial coordinates, well type (T200/T350), operational status.
+  - `Well`: Spatial coordinates (lat/lon), well type (T200/T350), operational status.
   - `Inspection`: Thermal $\Delta T$, spill detection, inspection method (drone/manual).
   - `Maintenance`: Cost breakdown, downtime hours, equipment kind, report markdown.
   - `RegulatoryEvent`: Violation agency, protocol ID, fine amounts, open/closed status.
@@ -161,18 +172,31 @@ flowchart LR
   - `HAS_REPORT` (Maintenance $\to$ Engineering Report)
   - `CORRECTS` (ContextNote $\to$ Inspection)
   - `GOVERNED_BY` (Well $\to$ SOP / Manual)
+  - `NEARBY_WELL` (Well $\to$ Well: spatial k-NN edges on lat/lon distance)
 
-### 4.2 1D-CNN + RCN Anomaly Pre-Filter
-- Maps binary and normalized anomaly indicators into latent space $H=16$:
+### 4.2 Anomaly Pre-Filter & Elimination
+- Evaluates anomaly indicators:
   $$\mathbf{h}_{\text{cnn}} = \text{ReLU}(\text{Conv1D}(\mathbf{X})), \quad \mathbf{h}_{\text{rcn}} = \text{ReLU}(\mathbf{X} \mathbf{W}_{\text{rcn}})$$
   $$\text{keep\_score} = \sigma(\mathbf{W}_{\text{gate}} (\mathbf{h}_{\text{cnn}} + \mathbf{h}_{\text{rcn}}) + b_{\text{gate}})$$
-- **Zero False-Negative Safety Invariant:** Any record with `has_spill == 1.0`, `is_non_producing == 1.0`, `has_repair == 1.0`, `has_note == 1.0`, or `is_latest == 1.0` bypasses pruning unconditionally.
+- **Zero False-Negative Safety Invariant:** Any record with `has_spill == 1.0`, `is_non_producing == 1.0`, `has_repair == 1.0`, `has_note == 1.0`, or `is_latest == 1.0` bypasses pruning unconditionally. Non-existent entities in PostgreSQL/SQLite are dropped immediately to prevent hallucinations.
 
-### 4.3 Relation-wise GRUs & Dynamic Attention
-- Preserves relational context across historical weekly snapshots:
-  $$\mathbf{h}_r^{(t)} = \text{GRUCell}(\bar{\mathbf{m}}_r, \mathbf{h}_r^{(t-1)})$$
-  $$\alpha_r = \text{Softmax}(\text{Linear}(\mathbf{h}_r^{(t)}))$$
-- Semantic embedding priors: `CORRECTS: 3.5`, `TRIGGERED: 2.8`, `GOVERNED_BY: 2.6`, `HAS_REPORT: 2.2`, `HAS_INSPECTION: 1.8`, `CONTAINS: 1.2`.
+### 4.3 Relation-wise Dynamic Attention & Semantic Priors
+- Aggregates relation pools across temporal snapshots with semantic priors:
+  `CORRECTS: 3.5`, `TRIGGERED: 2.8`, `GOVERNED_BY: 2.6`, `HAS_REPORT: 2.2`, `HAS_INSPECTION: 1.8`, `NEARBY_WELL: 1.5`, `CONTAINS: 1.2`.
+
+---
+
+## 5. Visual Artifact Generation (7 Dynamic Types)
+
+The copilot selects from seven visual artifact schemas based on the analytical intent of the query:
+
+1. **`status_card`:** Single-well diagnostics (producing state, temperature delta, threshold, inspector name, and out-of-date warnings). Selected for single-well operational checks (Q1, Q15a, runtime mutation confirmation).
+2. **`table`:** Multi-attribute tabular data. Selected when listing offline wells across an area, compliance breaches, private repair cost summaries, or detailed multi-hop comparisons (Q2, Q9, Q10, Q11, Q13).
+3. **`line_chart`:** Time series trends. Selected when plotting weekly thermal readings against operating thresholds (Q3).
+4. **`bar_chart`:** Categorical downtime and spend rankings. Selected when comparing top downtime wells across an area or equipment failure costs (Q6).
+5. **`map`:** Interactive geo-coordinate pins. Selected when user asks for a map or spatial pin view of spills across an area (Q7).
+6. **`heatmap`:** 2D frequency matrix with dynamically computed area rows and calendar month columns. Selected when visualizing fleet-wide spill distribution across areas and months (Q8).
+7. **`text`:** Conversational explanations and clarifying questions. Selected when parameters are missing or when GateMem returns strict session isolation (`no_memory`).
 
 ---
 

@@ -68,8 +68,48 @@
 
 ---
 
-## 4. Next Operational Steps
+---
 
-1. Run live chat sessions through OpenUI interface at `http://localhost:3000` with streaming generative UI cards.
-2. Monitor real-time operator queries for unseen wells (`WELL-0201+`) during the upcoming 2-hour evaluation window.
-3. Keep all branches synchronized on any schema or UI tweaks.
+## 5. Final Hardening Pass (`fix/final-hardening`)
+
+**Branch:** `fix/final-hardening`  
+**Purpose:** Ensure 100% generalization to unseen test data (wells `WELL-0201+`, 5th area `NW-01`, shifted dates, varied equipment) and zero reliance on sample-dataset heuristics.
+
+### 5.1 Architecture & Engine Upgrades
+1. **Document-Driven Dynamic Rules Engine ([`backend/services/rules_engine.py`](file:///c:/Users/Priyanshu%20Patil/Documents/program01/flytbase/flytebase/backend/services/rules_engine.py)):**
+   - Parses $\Delta T$ operating thresholds (`T200.md`: 15.0 °C, `T350.md`: 20.0 °C), RCA repair count (3 repairs in 12m), and SOP compliance limits (`SR-01`: 5.0 bbl / 24h, `SR-02`: 4.0h containment, `SR-03`: 60d agency verification, `RC-04`: 30d NOV response) directly from markdown files.
+   - Startup rules table printed by CLI `python -m backend.load_dataset <path>`.
+   - Verified by [`tests/test_sop_variation.py`](file:///c:/Users/Priyanshu%20Patil/Documents/program01/flytbase/flytebase/tests/test_sop_variation.py): modifying SOP limits in markdown changes compliance immediately without code edits.
+
+2. **Dynamic Entity & Area Resolver ([`backend/services/copilot_agent.py`](file:///c:/Users/Priyanshu%20Patil/Documents/program01/flytbase/flytebase/backend/services/copilot_agent.py)):**
+   - Area names and aliases (e.g. `NE-8`, `SW 24`, `NW-01`, `Northwest Block 1`) resolved dynamically from `fleet/areas.json`.
+   - "Today" derived dynamically from the latest inspection timestamp via `get_as_of_date()` or env var `AS_OF_DATE`.
+   - Explicit clarification prompts returned when query lacks required entity identifiers.
+
+3. **GateMem Strict Session Isolation & Active Forgetting:**
+   - Private memory queries from unauthorized principals return exact message: *"I have no earlier conversation with you about that."* with `gatemem_action = "no_memory"`.
+   - Active forgetting tombstones records to redact text and prevent leaks.
+
+4. **Honest Evidence Prefilter & Graph Ranker ([`backend/ml/rcn_cnn_htgnn.py`](file:///c:/Users/Priyanshu%20Patil/Documents/program01/flytbase/flytebase/backend/ml/rcn_cnn_htgnn.py)):**
+   - Explicitly documented as a rule-based evidence prefilter plus graph relation-weighted ranker. All final numbers are calculated by deterministic SQL over `v_effective_inspections`.
+   - Spatial k-NN edges (`NEARBY_WELL`) added based on lat/lon distance.
+   - Entity existence asserted before returning candidates; non-existent assets dropped immediately.
+
+5. **Multi-Tier Infrastructure Honesty & Health Check:**
+   - Transparent fallback from PostgreSQL to SQLite (`v_effective_inspections`), Neo4j to NetworkX in-memory graph, and Redis to in-memory TTL cache.
+   - `/api/health` reports active database, graph backend, cache backend, `as_of_date`, and loaded wells.
+   - Immutable audit trail endpoint `/api/audit` exposes author provenance, timestamps, and raw vs corrected values.
+
+6. **Frontend User Picker & Generative UI Integration:**
+   - Added operator dropdown ([`frontend/src/components/user-picker.tsx`](file:///c:/Users/Priyanshu%20Patil/Documents/program01/flytbase/flytebase/frontend/src/components/user-picker.tsx)) reading `/api/backend/users` to allow switching between Michael Turner (`U-201`) and Jessica Reed (`U-202`) for testing private session isolation.
+   - Built Playwright browser automation script ([`tests/capture_screens.py`](file:///c:/Users/Priyanshu%20Patil/Documents/program01/flytbase/flytebase/tests/capture_screens.py)) driving UI through Q1, Q2, Q3, Q6, Q7, Q8, Q9 and saving full-page screenshots to `docs/screens/`.
+
+### 5.2 Verification Test Matrix
+- **`tests/test_sop_variation.py`:** **PASS** (100%)
+- **`tests/test_rephrasings.py`:** **47 / 47 PASS** (100%)
+- **`tests/test_synthetic_dataset.py`:** **8 / 8 PASS** (100%)
+- **`tests/test_corrections_persist.py`:** **PASS** (100%)
+- **`backend/verify_18_queries.py`:** **18 / 18 PASS** (100%)
+- **`backend/test_chat_e2e.py`:** **19 / 19 PASS** (100%)
+- **`tests/capture_screens.py`:** **7 / 7 Screenshots Captured** (100%)
+

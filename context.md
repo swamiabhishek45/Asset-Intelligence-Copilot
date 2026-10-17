@@ -47,7 +47,7 @@ $$\Delta T = T_{\text{wellhead}} - T_{\text{ambient}}$$
 | Protocol ID | Protocol Title | Critical Compliance Criteria |
 | :--- | :--- | :--- |
 | **SR-01** | Spill Notification Requirement | Mandatory notification within 24 hours for spills $\ge 5.0\,\text{bbl}$. |
-| **SR-02** | Containment Duration Limits | Time from spill discovery to containment must not exceed **6.0 hours**. Any containment taking $> 6.0\,\text{h}$ constitutes a regulatory violation. |
+| **SR-02** | Containment Duration Limits | Time from spill discovery to containment must not exceed **4.0 hours** (per `fleet/sops/spill-response-sop.md`). Any containment taking $> 4.0\,\text{h}$ constitutes a regulatory violation. |
 | **SR-03** | 60-Day Corrective Action Follow-up | Following a reportable spill, corrective repair verification must occur within **60 days**. Open actions without verified repair are flagged. |
 | **RC-04** | Root Cause Analysis (RCA) Trigger | Any equipment kind (e.g. `flowline`, `rod_string`) experiencing **$\ge 3$ repair events** within a 12-month rolling window triggers a mandatory formal RCA investigation. |
 | **WS-03** | Hydrogen Sulfide ($H_2S$) Safety Protocol | Area containment and respiratory gear required when atmospheric concentration exceeds **10 ppm**. |
@@ -120,12 +120,32 @@ The copilot implements the GateMem memory architecture to prevent hallucinations
 | **Q7** | NE Block 8 90-Day Spills | 4 spill pins: `WELL-0186`, `WELL-0165`, `WELL-0175`, `WELL-0151`. |
 | **Q8** | 2026 Fleet Spill Heatmap | Month $\times$ Area matrix; Southwest Block 24 highest (43 spills). |
 | **Q9** | WELL-0001 SOP Audit | 4 breaches (SR-01, SR-02 7.0h, open SR-03, open RC-04 Flowline RCA, $5,000 fine). |
-| **Q10** | SW Block 24 Containment Breaches | `WELL-0082` (7.1h) and `WELL-0100` (8.1h) exceeded 6.0h limit. |
+| **Q10** | SW Block 24 Containment Breaches | `WELL-0082` (7.1h) and `WELL-0100` (8.1h) exceeded 4.0h limit (SR-02). |
 | **Q11** | Private Session Recall | Recalls Michael Turner's private session: `WELL-0121` (\$25,794), `WELL-0138` (\$46,942), `WELL-0107` (\$5,176). |
 | **Q12** | Raw Temp Correction | Overrides 2026-10-15 reading for `WELL-0164` to $41.0^\circ\text{C}$; excludes it from Q2 offline list. |
 | **Q13** | Spill Volume Correction | Corrects `WELL-0151` spill from 4.5 to 5.4 bbl; cascades SR-01 notice breach and SR-03 follow-up. |
 | **Q14** | Scoped Rule Override | Lowers T350 RCA threshold from 3 to 2 repairs (adds `WELL-0120`); preserves T200 threshold at 3. |
-| **Q15** | Cross-User Propagation | Jessica Reed sees `WELL-0164` producing; Laura Diaz sees `WELL-0151` reportable. |
-| **Q16** | Cross-User Isolation | Jessica Reed blocked from Michael Turner's private session (`no_memory`). |
+| **Q15** | Cross-User Propagation | Jessica Reed sees `WELL-0164` producing; Laura Simmons (U-101) sees `WELL-0151` reportable. |
+| **Q16** | Cross-User Isolation | Jessica Reed blocked from Michael Turner's private session (`no_memory`: *"I have no earlier conversation with you about that."*). |
 | **Q17** | Data Conflict Detection | Unconfirmed user claims flagged with `Inspector Disagreement` alert. |
 | **Q18** | AI Disagreement Resolution | Ryan Brooks vs. Chris Dalton; sensor evidence stands with full audit trail. |
+
+---
+
+## 6. How the System Generalises to Unseen Test Data
+
+During the final 2-hour unseen evaluation, the system will encounter new wells (`WELL-0201+`), a 5th operational area, shifted dates, and varied equipment kinds. The copilot is hardened with three non-negotiable invariants:
+
+1. **Document-Driven Rules Engine (`backend/services/rules_engine.py`):**
+   - Operating temperature thresholds ($\Delta T \ge 15.0^\circ\text{C}$ for T200, $20.0^\circ\text{C}$ for T350), RCA repair thresholds (3 repairs in 12m), and regulatory limits (SR-01 5.0 bbl / 24h, SR-02 4.0h, SR-03 60d, RC-04 30d) are **never hardcoded constants**.
+   - They are parsed directly from `fleet/well-types/*.md` and `fleet/sops/*.md` at startup and logged. Any variation in SOP limits immediately drives compliance calculations without code edits.
+
+2. **Dynamic Area Resolution & Schema-Agnostic Entity Extraction:**
+   - Production areas and aliases (e.g. `NE-8`, `SW 24`, `Northwest Block 1`, `NW-01`) are loaded dynamically from `fleet/areas.json`.
+   - Asset IDs are matched dynamically via regex (`WELL-\d+`).
+   - "Today" is derived dynamically via `get_as_of_date()` from the latest inspection record in the database, overridable by the `AS_OF_DATE` environment variable.
+
+3. **Deterministic SQL Core (`v_effective_inspections`):**
+   - **Every final number** (downtime days, spill volumes, repair costs, breach deadlines) is calculated exclusively by deterministic SQL and domain rule logic.
+   - The LLM and graph layer never generate or guess numbers.
+   - Raw sensor telemetry is never mutated; human corrections are recorded in `context_notes` with author provenance, timestamp, and scope, and queried seamlessly via the governed SQL view `v_effective_inspections`.
