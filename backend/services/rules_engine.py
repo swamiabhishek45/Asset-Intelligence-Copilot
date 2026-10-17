@@ -24,6 +24,9 @@ class DynamicRulesEngine:
         self.root = Path(data_root)
         self.load_rules()
 
+    def reload(self):
+        self.load_rules()
+
     def load_rules(self):
         self.well_type_rules = self._parse_well_types()
         self.sop_rules = self._parse_sops()

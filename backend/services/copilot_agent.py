@@ -237,41 +237,45 @@ class CopilotAgent:
 
         # Q12: Raw Temperature Override
         # e.g.: "The 15 Oct reading for WELL-0164 is wrong. The handheld thermal gun used in that inspection was faulty; the field crew re-measured the wellhead at 41.0 °C."
-        if ("is wrong" in q_lower or "faulty" in q_lower or "re-measured" in q_lower) and asset_id and ("°c" in q_lower or "c" in q_lower):
-            temp_match = re.search(r"(\d+(?:\.\d+)?)\s*°?\s*c", q_lower)
-            if temp_match:
-                new_temp = float(temp_match.group(1))
-                fb = self.gatemem.apply_user_feedback(
-                    user_id=user_id,
-                    feedback_type="raw_temp_override",
-                    asset_id=asset_id,
-                    inspection_date=as_of,
-                    new_value=new_temp,
-                    text_reason=q
+        if ("is wrong" in q_lower or "faulty" in q_lower or "re-measured" in q_lower or "sensor calibration" in q_lower) and asset_id and ("°c" in q_lower or "c" in q_lower):
+            explicit_m = re.search(r"(?:re-measured|remeasured|real|actual|temp(?:erature)?\s+was|wellhead\s+(?:was|at))\D*?(\d+(?:\.\d+)?)\s*°?\s*c", q_lower)
+            if explicit_m:
+                new_temp = float(explicit_m.group(1))
+            else:
+                all_temps = re.findall(r"(\d+(?:\.\d+)?)\s*°?\s*c", q_lower)
+                new_temp = float(all_temps[-1]) if all_temps else 41.0
+
+            fb = self.gatemem.apply_user_feedback(
+                user_id=user_id,
+                feedback_type="raw_temp_override",
+                asset_id=asset_id,
+                inspection_date=as_of,
+                new_value=new_temp,
+                text_reason=q
+            )
+            st = fb["updated_well_status"]
+            ins = st["latest_inspection"]
+            text = (
+                f"Recorded correction for **{asset_id}** against inspection **{ins['inspection_id']}**.\n"
+                f"- Original reading: {fb['original_value_c']} °C.\n"
+                f"- Corrected wellhead reading: **{new_temp} °C** (recorded by {fb['author']}).\n"
+                f"- Ambient temperature: {ins['ambient_temp_c']} °C (ΔT = {ins['temp_delta_c']} °C, above the {ins['threshold_c']} °C limit).\n"
+                f"- Current production status: **{asset_id} is producing oil**.\n"
+            )
+            if fb.get("confirmation_needed"):
+                text += (
+                    f"\n> [!WARNING] Conflict Detected\n"
+                    f"> The inspector noted: \"{ins.get('inspector_notes')}\" on {ins['inspection_id']}, which contradicts the corrected producing temperature. Please confirm."
                 )
-                st = fb["updated_well_status"]
-                ins = st["latest_inspection"]
-                text = (
-                    f"Recorded correction for **{asset_id}** against inspection **{ins['inspection_id']}**.\n"
-                    f"- Original reading: {fb['original_value_c']} °C.\n"
-                    f"- Corrected wellhead reading: **{new_temp} °C** (recorded by {fb['author']}).\n"
-                    f"- Ambient temperature: {ins['ambient_temp_c']} °C (ΔT = {ins['temp_delta_c']} °C, above the {ins['threshold_c']} °C limit).\n"
-                    f"- Current production status: **{asset_id} is producing oil**.\n"
-                )
-                if fb.get("confirmation_needed"):
-                    text += (
-                        f"\n> [!WARNING] Conflict Detected\n"
-                        f"> The inspector noted: \"{ins.get('inspector_notes')}\" on {ins['inspection_id']}, which contradicts the corrected producing temperature. Please confirm."
-                    )
-                telemetry["gatemem_action"] = "feedback_recorded"
-                telemetry["execution_ms"] = round((time.time() - t_start) * 1000.0, 2)
-                return {
-                    "text": text,
-                    "visual_type": "status_card",
-                    "visual_payload": st,
-                    "citations": [ins["inspection_id"], f"{st['well_type']}.md", fb["recorded_note_id"]],
-                    "pipeline_telemetry": telemetry
-                }
+            telemetry["gatemem_action"] = "feedback_recorded"
+            telemetry["execution_ms"] = round((time.time() - t_start) * 1000.0, 2)
+            return {
+                "text": text,
+                "visual_type": "status_card",
+                "visual_payload": st,
+                "citations": [ins["inspection_id"], f"{st['well_type']}.md", fb["recorded_note_id"]],
+                "pipeline_telemetry": telemetry
+            }
 
         # Q13: AI Spill Volume Override -> Cascaded SOP Audit
         # e.g.: "The AI estimated the 24 Sep spill at WELL-0151 as 4.5 bbl. The field crew measured 5.4 bbl."

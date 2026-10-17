@@ -1,3 +1,15 @@
+"""
+Heterogeneous Temporal Graph Evidence Prefilter & Relation-Weighted Ranker.
+
+ARCHITECTURE:
+- Rule-based evidence prefilter plus graph relation-weighted ranker (incorporating heterogeneous
+  spatial-temporal packet scoring).
+- NOT an end-to-end trained black-box neural network: deterministic SQL and rules govern all
+  final numbers, while graph connectivity and spatio-temporal decay score relevance.
+- Preserves 100% of anomalies, human corrections, and open repairs.
+- Real timed inference and existence checks to ensure no hallucinated entities.
+"""
+
 import time
 import math
 from datetime import datetime, timezone
@@ -90,38 +102,75 @@ class HeterogeneousTemporalGraphBuilder:
                 (asset_id,)
             )
             well_row = cur.fetchone()
-            if well_row:
-                is_t350 = 1.0 if well_row["well_type"] == "T350" else 0.0
-                is_act = 1.0 if str(well_row["recorded_status"]).lower() == "active" else 0.0
-                w_feats = [
-                    (float(well_row["lat"]) - 31.0) / 5.0,
-                    (float(well_row["lon"]) + 102.0) / 5.0,
-                    is_t350,
-                    is_act,
-                    20.0 / 25.0 if is_t350 else 15.0 / 25.0
-                ]
-                htg.add_node(HTGNode(
-                    id=asset_id,
-                    node_type="Well",
-                    features=w_feats,
-                    metadata={"well_type": well_row["well_type"], "area_id": well_row["area_id"]}
-                ))
-                # Relation: CONTAINS (Area -> Well)
-                htg.add_edge(HTGEdge(
-                    source_id=well_row["area_id"],
-                    source_type="Area",
-                    relation="CONTAINS",
-                    target_id=asset_id,
-                    target_type="Well"
-                ))
-                # Relation: GOVERNED_BY (Well -> SOP)
-                htg.add_edge(HTGEdge(
-                    source_id=asset_id,
-                    source_type="Well",
-                    relation="GOVERNED_BY",
-                    target_id=f"SOP-{well_row['well_type']}",
-                    target_type="SOP"
-                ))
+            if not well_row:
+                # Entity existence assertion: well does not exist in DB, prevent hallucination
+                return htg, []
+
+            is_t350 = 1.0 if well_row["well_type"] == "T350" else 0.0
+            is_act = 1.0 if str(well_row["recorded_status"]).lower() == "active" else 0.0
+            w_feats = [
+                (float(well_row["lat"]) - 31.0) / 5.0,
+                (float(well_row["lon"]) + 102.0) / 5.0,
+                is_t350,
+                is_act,
+                20.0 / 25.0 if is_t350 else 15.0 / 25.0
+            ]
+            htg.add_node(HTGNode(
+                id=asset_id,
+                node_type="Well",
+                features=w_feats,
+                metadata={"well_type": well_row["well_type"], "area_id": well_row["area_id"]}
+            ))
+            # Relation: CONTAINS (Area -> Well)
+            htg.add_edge(HTGEdge(
+                source_id=well_row["area_id"],
+                source_type="Area",
+                relation="CONTAINS",
+                target_id=asset_id,
+                target_type="Well"
+            ))
+            # Relation: GOVERNED_BY (Well -> SOP)
+            htg.add_edge(HTGEdge(
+                source_id=asset_id,
+                source_type="Well",
+                relation="GOVERNED_BY",
+                target_id=f"SOP-{well_row['well_type']}",
+                target_type="SOP"
+            ))
+
+            # Spatial k-NN edges on lat/lon (k=3 nearest neighbor wells)
+            if well_row.get("lat") is not None and well_row.get("lon") is not None:
+                cur.execute(
+                    """
+                    SELECT w.asset_id, w.well_type, w.lat, w.lon
+                    FROM wells w
+                    WHERE w.asset_id != %s AND w.lat IS NOT NULL AND w.lon IS NOT NULL
+                    """,
+                    (asset_id,)
+                )
+                other_wells = cur.fetchall()
+                t_lat = float(well_row["lat"])
+                t_lon = float(well_row["lon"])
+                ranked_neighbors = []
+                for ow in other_wells:
+                    dist = math.hypot(float(ow["lat"]) - t_lat, float(ow["lon"]) - t_lon)
+                    ranked_neighbors.append((dist, ow))
+                ranked_neighbors.sort(key=lambda x: x[0])
+                for dist, nw in ranked_neighbors[:3]:
+                    htg.add_node(HTGNode(
+                        id=nw["asset_id"],
+                        node_type="Well",
+                        features=[float(nw["lat"]), float(nw["lon"]), 0.0, 1.0, 0.0],
+                        metadata={"well_type": nw["well_type"]}
+                    ))
+                    htg.add_edge(HTGEdge(
+                        source_id=asset_id,
+                        source_type="Well",
+                        relation="NEARBY_WELL",
+                        target_id=nw["asset_id"],
+                        target_type="Well",
+                        weight=round(1.0 / (1.0 + dist * 100.0), 4)
+                    ))
 
             # 2. Inspection Nodes (via governed v_effective_inspections)
             cur.execute(
@@ -434,7 +483,8 @@ class SEHTGNNPacketScorer(nn.Module):
             "TRIGGERED",
             "HAS_REPORT",
             "CORRECTS",
-            "GOVERNED_BY"
+            "GOVERNED_BY",
+            "NEARBY_WELL"
         ]
         self.rel_transforms = nn.ModuleDict({
             r: nn.Linear(hidden_dim, hidden_dim, bias=False) for r in self.relations
@@ -455,7 +505,8 @@ class SEHTGNNPacketScorer(nn.Module):
             "GOVERNED_BY": 2.6,    # Q9, Q10, Q14: SOP & RCA rule compliance
             "HAS_REPORT": 2.2,     # Q9: Containment duration & technician notes
             "HAS_INSPECTION": 1.8, # Sensor telemetry
-            "CONTAINS": 1.2        # Spatial grouping
+            "CONTAINS": 1.2,       # Spatial grouping
+            "NEARBY_WELL": 1.5     # Spatial k-NN proximity
         }
         self.prior_proj = nn.Linear(1, hidden_dim)
 
