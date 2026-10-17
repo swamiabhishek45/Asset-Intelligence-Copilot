@@ -1,0 +1,49 @@
+/* OpenUI + Tailwind coexistence: do not collapse Agent Interface layout. */
+
+.openui-agent-container {
+  --openui-agent-sidebar-width: 300px;
+}
+
+@media (min-width: 1024px) {
+  .openui-agent-sidebar-container:not(.openui-agent-sidebar-container--collapsed) {
+    min-width: 300px;
+  }
+}
+
+.openui-agent-sidebar-header__top-row {
+  align-items: flex-start;
+  width: 100%;
+}
+
+.openui-agent-sidebar-header__agent-name {
+  white-space: normal;
+  overflow: visible;
+  text-overflow: unset;
+}
+
+.openui-agent-sidebar-footer {
+  width: 100%;
+  min-width: 0;
+  padding-top: var(--openui-space-s);
+  margin-top: auto;
+}
+
+.flytbase-sidebar-status {
+  box-sizing: border-box;
+}
+
+.flytbase-thread-toolbar {
+  display: flex;
+  width: 100%;
+  min-width: 0;
+  justify-content: flex-end;
+}
+
+/* Keep model switcher in the main panel, not over the sidebar */
+.openui-agent-thread-header__start .flytbase-thread-toolbar {
+  justify-content: flex-start;
+}
+
+.openui-agent-thread-header__end .flytbase-thread-toolbar {
+  justify-content: flex-end;
+}

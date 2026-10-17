@@ -1,19 +1,35 @@
-# Frontend — FlytBase Asset Intelligence Copilot
+# FlytBase Asset Copilot — Frontend
 
-UI for the Asset Intelligence Copilot (chat, dashboards, asset views).
+Generative UI chat for field operators, built with **Next.js**, **OpenUI**, and **shadcn-style** components (black/white neutral theme).
 
-**Work on this code from the `frontend-dev` branch.** Only change files under `frontend/` (and coordinate before editing shared root files).
+## Prerequisites
 
-## Getting started
+- Node.js 20+
+- Running [FastAPI backend](../backend/README.md) on port 8000
+- `THESYS_API_KEY` for OpenUI Gateway ([getting started](https://www.openui.com/docs/getting-started))
 
-Add your app scaffold here (e.g. Vite + React, Next.js). Point API calls at the backend:
-
-- Local API: `http://localhost:8000`
-- OpenAPI: `http://localhost:8000/docs`
+## Setup
 
 ```bash
-# Example once package.json exists:
 cd frontend
 npm install
+npm run generate:apiKey   # you run this — paste key into .env
+cp .env.example .env      # if needed
 npm run dev
 ```
+
+App: http://localhost:3000
+
+## Docs
+
+- [Backend integration](docs/BACKEND-INTEGRATION.md)
+- [Context / session notes](docs/CONTEXT.md)
+- [Monorepo branching](../../docs/BRANCHING.md)
+
+## Scripts
+
+| Command | Description |
+|---------|-------------|
+| `npm run dev` | Regenerate OpenUI spec + start Next dev server |
+| `npm run generate` | Refresh `src/generated/spec.json` from component library |
+| `npm run build` | Production build |
