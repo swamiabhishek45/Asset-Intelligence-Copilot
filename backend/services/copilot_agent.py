@@ -475,7 +475,7 @@ class CopilotAgent:
                 }
 
         # Q18: Spill Reality Disagreement Check (e.g. WELL-0101 on 20 Aug)
-        if asset_id and "spill" in q_lower and ("real" in q_lower or "real oil" in q_lower or "crude" in q_lower or "sheen" in q_lower):
+        if asset_id and "spill" in q_lower and any(w in q_lower for w in ["real crude", "real oil", "was it real", "actually real", "produced water", "water or oil", "disagree", "sheen", "reality"]):
             conf = self.engine.check_spill_reality_conflict(asset_id, date_prefix="2026-08-20")
             ins = conf.get("ai_detection")
             text = (
@@ -646,9 +646,9 @@ class CopilotAgent:
             }
 
         # Q4: Spills for Specific Well over Time
-        if asset_id and "spill" in q_lower and ("4 years" in q_lower or "how many" in q_lower or "history" in q_lower or "total" in q_lower):
+        if asset_id and "spill" in q_lower and not any(w in q_lower for w in ["rule", "sop", "broken", "breach", "real"]):
             start_w, end_w = date_parser.parse_window(q, default_as_of=as_of)
-            if "4 years" in q_lower or "history" in q_lower:
+            if "4 years" in q_lower or "history" in q_lower or "all" in q_lower:
                 start_w = (datetime.fromisoformat(as_of) - timedelta(days=1460)).strftime("%Y-%m-%d")
 
             res = self.engine.query_spills(start_w, end_w, asset_id=asset_id)
@@ -692,7 +692,7 @@ class CopilotAgent:
             }
 
         # Q5 / Q6: Downtime Calculations
-        if ("downtime" in q_lower or bool(re.search(r"\bdown\b", q_lower))) and "breakdown" not in q_lower:
+        if ("downtime" in q_lower or bool(re.search(r"\bdown\b", q_lower))) and not any(b in q_lower for b in ["breakdown", "break down", "shut down", "downhole"]):
             start_w, end_w = date_parser.parse_window(q, default_as_of=as_of)
 
             # Single well in specific period (e.g. WELL-0001 in 2025)
@@ -787,7 +787,7 @@ class CopilotAgent:
             }
 
         # Q1 / Q15a: Single Well Status Right Now
-        if asset_id and ("producing" in q_lower or "status card" in q_lower or "right now" in q_lower or "last inspected" in q_lower or "how is" in q_lower or "check" in q_lower):
+        if asset_id and any(k in q_lower for k in ["producing", "status", "card", "right now", "last inspected", "how is", "check", "operating", "condition", "inspect", "producing oil"]):
             st = self.engine.evaluate_well_status(asset_id)
             ins = st["latest_inspection"]
             is_prod = st["producing_oil"]
