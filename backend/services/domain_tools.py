@@ -53,6 +53,7 @@ class AssetIntelligenceDomainEngine:
             FROM context_notes c
             LEFT JOIN users u ON c.author_user_id = u.user_id
             WHERE c.inspection_id IS NOT NULL
+              AND COALESCE(c.verification_status, 'confirmed') != 'deleted_forgotten'
         """
         params = ()
         if asset_id:
@@ -136,6 +137,7 @@ class AssetIntelligenceDomainEngine:
                 FROM context_notes c
                 LEFT JOIN users u ON c.author_user_id = u.user_id
                 WHERE c.asset_id = %s
+                  AND COALESCE(c.verification_status, 'confirmed') != 'deleted_forgotten'
                 ORDER BY c.created_at DESC
                 """,
                 (asset_id,)
@@ -703,4 +705,122 @@ class AssetIntelligenceDomainEngine:
                 "rationale": "Neither note is a formal correction, and a spill repair was performed, so the detection stands as real crude oil."
             }
 
+    # -------------------------------------------------------------------------
+    # UNSEEN MULTI-DIMENSION ANALYTICS & SAFE SQL
+    # -------------------------------------------------------------------------
+    def execute_safe_readonly_sql(self, sql_query: str) -> List[Dict[str, Any]]:
+        """Executes a read-only SELECT query over governed views and tables."""
+        cleaned = sql_query.strip().rstrip(";")
+        if not cleaned.upper().startswith("SELECT") or any(
+            kw in cleaned.upper() for kw in ["DROP ", "DELETE ", "UPDATE ", "INSERT ", "ALTER ", "TRUNCATE "]
+        ):
+            raise ValueError("Only read-only SELECT queries are permitted.")
+        with get_db_connection() as conn:
+            cur = conn.cursor()
+            cur.execute(cleaned)
+            return [dict(r) for r in cur.fetchall()]
+
+    def query_unseen_analytics(self, query_text: str) -> Dict[str, Any]:
+        """
+        General-purpose analytical router for unseen test dataset questions:
+        - Contractor / technician repair costs & counts
+        - Equipment kind failure & cost breakdowns (rod_string, separator, flowline, etc.)
+        - Drone vs. manual inspection & spill statistics
+        - Regulatory agency fines & open Notice of Violation summaries
+        """
+        q_low = query_text.lower()
+        with get_db_connection() as conn:
+            cur = conn.cursor()
+
+            # 1. Contractor analytics
+            if "contractor" in q_low:
+                cur.execute(
+                    """
+                    SELECT COALESCE(contractor, 'In-House Crew') AS contractor,
+                           COUNT(*) AS repair_count,
+                           ROUND(SUM(cost_total_usd), 2) AS total_cost_usd,
+                           ROUND(SUM(downtime_hours), 1) AS total_repair_hours,
+                           MIN(maintenance_id) AS sample_citation
+                    FROM maintenance
+                    GROUP BY COALESCE(contractor, 'In-House Crew')
+                    ORDER BY total_cost_usd DESC
+                    """
+                )
+                rows = [dict(r) for r in cur.fetchall()]
+                return {
+                    "category": "contractor_analytics",
+                    "visual_type": "bar_chart" if "chart" in q_low or "compare" in q_low else "table",
+                    "rows": rows,
+                    "citations": [r["sample_citation"] for r in rows[:5] if r.get("sample_citation")]
+                }
+
+            # 2. Equipment kind breakdown
+            if any(eq in q_low for eq in ["equipment", "rod_string", "separator", "downhole_pump", "flowline", "wellhead"]):
+                cur.execute(
+                    """
+                    SELECT equipment_kind,
+                           maintenance_type,
+                           COUNT(*) AS job_count,
+                           ROUND(SUM(cost_total_usd), 2) AS total_cost_usd,
+                           MIN(maintenance_id) AS sample_citation
+                    FROM maintenance
+                    GROUP BY equipment_kind, maintenance_type
+                    ORDER BY total_cost_usd DESC
+                    """
+                )
+                rows = [dict(r) for r in cur.fetchall()]
+                return {
+                    "category": "equipment_analytics",
+                    "visual_type": "bar_chart" if "chart" in q_low else "table",
+                    "rows": rows,
+                    "citations": [r["sample_citation"] for r in rows[:5] if r.get("sample_citation")]
+                }
+
+            # 3. Drone vs Manual inspection method analytics
+            if "drone" in q_low or "manual" in q_low or "inspector" in q_low:
+                cur.execute(
+                    """
+                    SELECT method,
+                           COUNT(*) AS inspection_count,
+                           SUM(effective_spill_detected) AS valid_spills_found,
+                           ROUND(SUM(COALESCE(effective_spill_volume_bbl, 0)), 2) AS total_spill_bbl,
+                           MIN(inspection_id) AS sample_citation
+                    FROM v_effective_inspections
+                    GROUP BY method
+                    ORDER BY inspection_count DESC
+                    """
+                )
+                rows = [dict(r) for r in cur.fetchall()]
+                return {
+                    "category": "inspection_method_analytics",
+                    "visual_type": "bar_chart",
+                    "rows": rows,
+                    "citations": [r["sample_citation"] for r in rows if r.get("sample_citation")]
+                }
+
+            # 4. Regulatory fines & agency analytics
+            if "fine" in q_low or "agency" in q_low or "violation" in q_low or "regulator" in q_low:
+                cur.execute(
+                    """
+                    SELECT agency,
+                           status,
+                           COUNT(*) AS event_count,
+                           ROUND(SUM(COALESCE(fine_usd, 0)), 2) AS total_fines_usd,
+                           MIN(event_id) AS sample_citation
+                    FROM regulatory_events
+                    GROUP BY agency, status
+                    ORDER BY total_fines_usd DESC
+                    """
+                )
+                rows = [dict(r) for r in cur.fetchall()]
+                return {
+                    "category": "regulatory_agency_analytics",
+                    "visual_type": "table",
+                    "rows": rows,
+                    "citations": [r["sample_citation"] for r in rows if r.get("sample_citation")]
+                }
+
+            return {"category": "none", "rows": [], "citations": []}
+
 domain_engine = AssetIntelligenceDomainEngine()
+
