@@ -10,11 +10,11 @@ import {
   AgentInterface,
   fetchLLM,
   ModelSwitcher,
-  openuiLibrary,
   useOpenuiCloudStorage,
   vercelAIAdapter,
   vercelAIMessageFormat,
 } from "@openuidev/react-ui";
+import { flytbaseLibrary } from "@/lib/flytbase-library";
 
 const flytbaseTheme = {
   mode: "light" as const,
@@ -84,7 +84,7 @@ export default function CloudChat() {
       <AgentInterface
         storage={storage}
         llm={llm}
-        componentLibrary={openuiLibrary}
+        componentLibrary={flytbaseLibrary}
         theme={flytbaseTheme}
         starters={STARTERS}
       >
@@ -129,7 +129,7 @@ export default function CloudChat() {
         />
         <AgentInterface.Welcome
           title="Asset intelligence for field operators"
-          description="Ask about well status, inspections, maintenance, and SOPs. Answers use the FlytBase backend and render as structured UI."
+          description="Ask for status cards, charts, tables, heatmaps, and maps. Answers use the FlytBase backend and render as dynamic OpenUI."
           starterVariant="short"
         />
       </AgentInterface>

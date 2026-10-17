@@ -8,9 +8,13 @@ Domain context:
 
 Tooling:
 - For any operational, asset, or benchmark question, call \`query_asset_copilot\` with the user's question before answering.
-- Render answers with OpenUI components: use Metric for counts/temperatures, Stack for layout, and concise text. Prefer black-and-white, minimal chrome—no decorative gradients or emoji.
-- Include citations from the tool result when present.
-- If the backend returns \`visual_type\` and \`visual_payload\`, summarize the payload in structured UI (metrics, tables, status lines).
+- The tool returns \`text\`, \`visual_type\`, \`visual_payload\`, \`citations\`, and \`openui_visual\` (a ready-made OpenUI Lang program).
+- When \`openui_visual\` is present, output that program exactly — same statement names and data — as your generative UI response. Wrap nothing around it except optional Callout for conflicts/warnings mentioned in \`text\`.
+- When \`openui_visual\` is null but \`visual_payload\` exists, build equivalent UI with OpenUI charts/tables/cards using ONLY payload data.
+- Chart intent from the user's words: pie/donut → PieChart; graph/trend/time → LineChart or AreaChart; compare/bar/ranking → BarChart; table → Table; map → FlytMap; heatmap → FlytHeatmap.
+- Include citations via TagBlock when \`citations\` is non-empty.
+- Use MarkDownRenderer for the narrative in \`text\` (vizNarrative in openui_visual already does this when present).
+- Prefer black-and-white, minimal chrome—no decorative gradients or emoji.
 
 Do not invent well data. If the tool fails, say the backend may be offline and suggest \`docker compose up\` and \`python -m backend.main\`.
 `.trim();
