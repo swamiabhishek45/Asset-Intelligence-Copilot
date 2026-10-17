@@ -29,10 +29,9 @@ def check_postgres_availability(dsn: str) -> bool:
     # Quick socket check on port 5432 to avoid multi-second TCP timeout on Windows
     try:
         import socket
-        s = socket.socket()
-        s.settimeout(0.05)
-        s.connect(('127.0.0.1', 5432))
-        s.close()
+        with socket.socket() as s:
+            s.settimeout(0.05)
+            s.connect(('127.0.0.1', 5432))
     except Exception:
         _POSTGRES_AVAILABLE = False
         return False
@@ -136,8 +135,82 @@ def get_db_connection() -> DBConnection:
     return DBConnection()
 
 
+EFFECTIVE_INSPECTIONS_VIEW_SQL = """
+CREATE VIEW IF NOT EXISTS v_effective_inspections AS
+SELECT
+    i.inspection_id,
+    i.asset_id,
+    w.well_type,
+    w.area_id,
+    a.name AS area_name,
+    w.team_id,
+    w.lat,
+    w.lon,
+    w.recorded_status,
+    i.inspected_at,
+    i.inspector_user_id,
+    u.name AS inspector_name,
+    i.method,
+    i.ambient_temp_c,
+    i.wellhead_temp_c AS raw_wellhead_temp_c,
+    COALESCE(
+        CAST((SELECT c.corrected_value FROM context_notes c
+              WHERE c.inspection_id = i.inspection_id
+                AND c.note_type = 'correction'
+                AND c.field_overridden = 'wellhead_temp_c'
+                AND COALESCE(c.verification_status, 'confirmed') != 'deleted_forgotten'
+              ORDER BY c.created_at DESC LIMIT 1) AS REAL),
+        i.wellhead_temp_c
+    ) AS effective_wellhead_temp_c,
+    (
+        COALESCE(
+            CAST((SELECT c.corrected_value FROM context_notes c
+                  WHERE c.inspection_id = i.inspection_id
+                    AND c.note_type = 'correction'
+                    AND c.field_overridden = 'wellhead_temp_c'
+                    AND COALESCE(c.verification_status, 'confirmed') != 'deleted_forgotten'
+                  ORDER BY c.created_at DESC LIMIT 1) AS REAL),
+            i.wellhead_temp_c
+        ) - i.ambient_temp_c
+    ) AS effective_temp_delta_c,
+    COALESCE(
+        (SELECT sr.numeric_value FROM scoped_rules sr
+         WHERE sr.scope_type = 'WELL_TYPE'
+           AND sr.scope_value = w.well_type
+           AND sr.parameter_name = 'min_temp_delta_c'
+         ORDER BY sr.is_user_override DESC, sr.id DESC LIMIT 1),
+        CASE WHEN w.well_type = 'T350' THEN 20.0 ELSE 15.0 END
+    ) AS min_temp_delta_c,
+    CASE
+        WHEN EXISTS (
+            SELECT 1 FROM context_notes c
+            WHERE c.inspection_id = i.inspection_id
+              AND c.note_type = 'correction'
+              AND c.field_overridden = 'spill_detected'
+              AND c.corrected_value = 'false'
+              AND COALESCE(c.verification_status, 'confirmed') != 'deleted_forgotten'
+        ) THEN 0
+        ELSE i.spill_detected
+    END AS effective_spill_detected,
+    i.spill_est_volume_bbl AS raw_spill_volume_bbl,
+    COALESCE(
+        CAST((SELECT c.corrected_value FROM context_notes c
+              WHERE c.inspection_id = i.inspection_id
+                AND c.note_type = 'correction'
+                AND c.field_overridden = 'spill_est_volume_bbl'
+                AND COALESCE(c.verification_status, 'confirmed') != 'deleted_forgotten'
+              ORDER BY c.created_at DESC LIMIT 1) AS REAL),
+        i.spill_est_volume_bbl
+    ) AS effective_spill_volume_bbl,
+    i.notes AS inspector_notes
+FROM inspections i
+JOIN wells w ON i.asset_id = w.asset_id
+JOIN areas a ON w.area_id = a.area_id
+LEFT JOIN users u ON i.inspector_user_id = u.user_id;
+"""
+
 def init_database():
-    """Initializes schema and critical performance indexes."""
+    """Initializes schema, governed views, and critical performance indexes."""
     schema_path = Path(__file__).parent / "schema.sql"
     sql_text = schema_path.read_text(encoding="utf-8")
     
@@ -158,10 +231,16 @@ def init_database():
             conn._conn.execute('CREATE INDEX IF NOT EXISTS idx_ctx_ins ON context_notes(inspection_id)')
             conn._conn.execute('CREATE INDEX IF NOT EXISTS idx_reg_asset ON regulatory_events(asset_id)')
             conn._conn.execute('CREATE INDEX IF NOT EXISTS idx_reg_ins ON regulatory_events(related_inspection_id)')
+            # Governed SQL View
+            conn._conn.execute("DROP VIEW IF EXISTS v_effective_inspections")
+            conn._conn.execute(EFFECTIVE_INSPECTIONS_VIEW_SQL)
         else:
             conn.cursor().execute(sql_text)
+            pg_view_sql = EFFECTIVE_INSPECTIONS_VIEW_SQL.replace("CREATE VIEW IF NOT EXISTS", "CREATE OR REPLACE VIEW")
+            conn.cursor().execute(pg_view_sql)
         conn.commit()
 
 if __name__ == "__main__":
     init_database()
-    print("Database schema and performance indexes initialized.")
+    print("Database schema, governed view v_effective_inspections, and performance indexes initialized.")
+

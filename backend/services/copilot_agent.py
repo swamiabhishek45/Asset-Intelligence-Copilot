@@ -235,6 +235,31 @@ class CopilotAgent:
                 "pipeline_telemetry": telemetry
             }
 
+        # GateMem Active Forgetting (retract / forget note or claim)
+        if any(w in q_lower for w in ["forget", "retract", "delete note", "remove note", "delete claim"]) and asset_id:
+            kw = ""
+            for prep in ["about", "for", "on"]:
+                if f" {prep} " in q_lower:
+                    parts = q_lower.split(f" {prep} ")
+                    if len(parts) > 1 and not parts[-1].strip().upper().startswith("WELL-"):
+                        kw = parts[-1].strip().rstrip(".")
+            res = self.gatemem.retract_or_forget_note(user_id=user_id, asset_id=asset_id, target_keyword=kw)
+            text = (
+                f"**GateMem Active Forgetting (arXiv:2606.18829):**\n"
+                f"- Asset: **{asset_id}**\n"
+                f"- Tombstoned and redacted notes: {len(res['deleted_note_ids'])} record(s) ({', '.join(res['deleted_note_ids']) or 'none'}).\n"
+                f"- Action: `no_memory`. The record has been expunged; subsequent queries will return `no_memory` without leaking deleted content."
+            )
+            telemetry["gatemem_action"] = "no_memory"
+            telemetry["execution_ms"] = round((time.time() - t_start) * 1000.0, 2)
+            return {
+                "text": text,
+                "visual_type": "status_card",
+                "visual_payload": res,
+                "citations": [asset_id],
+                "pipeline_telemetry": telemetry
+            }
+
         # ---------------------------------------------------------------------
         # 2. ANALYTICAL QUERIES (Q1 - Q11, Q15, Q16b, Q16c, Q18 & UNSEEN)
         # ---------------------------------------------------------------------
@@ -494,7 +519,7 @@ class CopilotAgent:
             }
 
         # Q5 / Q6: Downtime Calculations
-        if "down" in q_lower or "downtime" in q_lower:
+        if ("downtime" in q_lower or bool(re.search(r"\bdown\b", q_lower))) and "breakdown" not in q_lower:
             # Single well in specific year (e.g. WELL-0001 in 2025)
             if asset_id and "2025" in q_lower:
                 res = self.engine.calculate_downtime("2025-01-01", "2025-12-31", asset_id=asset_id)
@@ -611,7 +636,63 @@ class CopilotAgent:
             }
 
         # ---------------------------------------------------------------------
-        # 3. UNSTRUCTURED SOP / REPORT RAG FALLBACK
+        # 3. UNSEEN MULTI-DIMENSION ANALYTICS
+        # ---------------------------------------------------------------------
+        unseen_res = self.engine.query_unseen_analytics(q)
+        if unseen_res.get("category") != "none":
+            cat = unseen_res["category"]
+            rows = unseen_res["rows"]
+            visual = unseen_res.get("visual_type", "table")
+            citations = unseen_res.get("citations", [])
+
+            if cat == "contractor_analytics":
+                text = "**Contractor Repair Performance & Expenditure Analysis:**\n"
+                for r in rows[:5]:
+                    text += f"- **{r['contractor']}**: {r['repair_count']} repairs, **${r['total_cost_usd']:,.2f}** total cost, {r['total_repair_hours']} downtime hours.\n"
+                visual_payload = {
+                    "headers": ["Contractor", "Repairs", "Total Cost (USD)", "Downtime (Hours)"],
+                    "rows": [[r["contractor"], r["repair_count"], f"${r['total_cost_usd']:,.2f}", r["total_repair_hours"]] for r in rows]
+                }
+            elif cat == "equipment_analytics":
+                text = "**Equipment Reliability & Failure Cost Breakdown:**\n"
+                for r in rows[:6]:
+                    text += f"- **{r['equipment_kind']}** ({r['maintenance_type']}): {r['job_count']} jobs, **${r['total_cost_usd']:,.2f}** total cost.\n"
+                visual_payload = {
+                    "headers": ["Equipment", "Maintenance Type", "Jobs", "Total Cost (USD)"],
+                    "rows": [[r["equipment_kind"], r["maintenance_type"], r["job_count"], f"${r['total_cost_usd']:,.2f}"] for r in rows]
+                }
+            elif cat == "inspection_method_analytics":
+                text = "**Inspection Method Comparison (Drone vs. Manual):**\n"
+                for r in rows:
+                    text += f"- **{r['method'].capitalize()}**: {r['inspection_count']} inspections conducted, {r['valid_spills_found']} valid spills detected, {r['total_spill_bbl']} bbl total volume.\n"
+                visual_payload = {
+                    "headers": ["Method", "Inspections Conducted", "Valid Spills Found", "Total Spill Volume (bbl)"],
+                    "rows": [[r["method"].capitalize(), r["inspection_count"], r["valid_spills_found"], r["total_spill_bbl"]] for r in rows]
+                }
+            elif cat == "regulatory_agency_analytics":
+                text = "**Regulatory Agency Enforcement & Notice of Violation Summary:**\n"
+                for r in rows:
+                    text += f"- **{r['agency']}** ({r['status']}): {r['event_count']} events, **${r['total_fines_usd']:,.2f}** total fines.\n"
+                visual_payload = {
+                    "headers": ["Regulatory Agency", "Status", "Events", "Total Fines (USD)"],
+                    "rows": [[r["agency"], r["status"].capitalize(), r["event_count"], f"${r['total_fines_usd']:,.2f}"] for r in rows]
+                }
+            else:
+                text = f"Computed unseen analytics across {len(rows)} records."
+                visual_payload = {"rows": rows}
+
+            telemetry["gatemem_action"] = "unseen_analytics_computed"
+            telemetry["execution_ms"] = round((time.time() - t_start) * 1000.0, 2)
+            return {
+                "text": text,
+                "visual_type": visual,
+                "visual_payload": visual_payload,
+                "citations": citations,
+                "pipeline_telemetry": telemetry
+            }
+
+        # ---------------------------------------------------------------------
+        # 4. UNSTRUCTURED SOP / REPORT RAG FALLBACK
         # ---------------------------------------------------------------------
         rag_results = self.rag.search_manuals_and_sops(q, top_k=3)
         if rag_results:

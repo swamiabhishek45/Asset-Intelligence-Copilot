@@ -192,4 +192,45 @@ class GateMemPolicyService:
                     "existing_notes": current_st["context_notes"]
                 }
 
+    def retract_or_forget_note(self, user_id: str, asset_id: str, target_keyword: str = "") -> Dict[str, Any]:
+        """
+        Implements GateMem (arXiv:2606.18829) Active Forgetting (F):
+        Tombstones runtime notes/claims on explicit deletion request so subsequent probes
+        return action='no_memory' without leaking or confirming the deleted content.
+        """
+        with get_db_connection() as conn:
+            cur = conn.cursor()
+            cur.execute(
+                """
+                SELECT note_id, text FROM context_notes
+                WHERE asset_id = %s
+                  AND note_type IN ('runtime_claim', 'operator_note', 'correction')
+                  AND COALESCE(verification_status, 'confirmed') != 'deleted_forgotten'
+                ORDER BY created_at DESC
+                """,
+                (asset_id,)
+            )
+            rows = cur.fetchall()
+            deleted_ids = []
+            for r in rows:
+                if not target_keyword or target_keyword.lower() in (r.get("text") or "").lower():
+                    cur.execute(
+                        """
+                        UPDATE context_notes
+                        SET verification_status = 'deleted_forgotten',
+                            text = '[REDACTED_BY_GATEMEM_ACTIVE_FORGETTING]'
+                        WHERE note_id = %s
+                        """,
+                        (r["note_id"],)
+                    )
+                    deleted_ids.append(r["note_id"])
+            conn.commit()
+            return {
+                "gatemem_action": "no_memory",
+                "asset_id": asset_id,
+                "deleted_note_ids": deleted_ids,
+                "status": "forgotten" if deleted_ids else "nothing_matched"
+            }
+
 gatemem_service = GateMemPolicyService(domain_engine)
+
